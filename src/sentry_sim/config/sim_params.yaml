@@ -1,0 +1,16 @@
+bridge:
+  ros__parameters:
+    use_sim_time: true
+    topics:
+      - ros_topic: /lidar
+        gz_topic: /lidar
+        ros_type: sensor_msgs/msg/LaserScan
+        gz_type: gz.msgs.LaserScan
+      - ros_topic: /odom
+        gz_topic: /odom
+        ros_type: nav_msgs/msg/Odometry
+        gz_type: gz.msgs.Odometry
+      - ros_topic: /cmd_vel
+        gz_topic: /cmd_vel
+        ros_type: geometry_msgs/msg/Twist
+        gz_type: gz.msgs.Twist

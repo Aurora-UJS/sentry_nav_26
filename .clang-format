@@ -1,0 +1,33 @@
+# 基于LLVM风格，常用且易读
+BasedOnStyle: LLVM
+
+# 缩进宽度，统一4个空格
+IndentWidth: 4
+
+# 不使用Tab字符，全部用空格
+UseTab: Never
+
+# 每行最大长度，超过换行，方便阅读
+ColumnLimit: 100
+
+# 允许空函数简写成单行，保持简洁
+AllowShortFunctionsOnASingleLine: Empty
+
+# 自动排序include头文件，保持整洁
+SortIncludes: true
+
+# 指针符号*的位置，左对齐（如 int* ptr）
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# 函数参数列表过长自动换行
+AllowAllParametersOfDeclarationOnNextLine: true
+
+# 保持运算符两边空格
+SpaceBeforeParens: ControlStatements
+
+# 函数调用括号前不留空格
+SpaceAfterCStyleCast: false
+
+# 逗号后添加空格
+SpaceAfterTemplateKeyword: true
