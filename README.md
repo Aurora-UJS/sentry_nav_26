@@ -1,16 +1,10 @@
-Sentry Nav 26
-A modular navigation system built with ROS 2 Jazzy and Nav2 for autonomous robot navigation.
-Overview
-This workspace contains packages for simulation, localization, mapping, navigation, and system integration, designed for modular development and testing with Gazebo Harmonic and Nav2.
-Packages
+# Sentry Nav 26
 
-sentry_common: Common utilities and data structures.
-sentry_sim: Gazebo Harmonic simulation environment.
-sentry_nav: Navigation core (planners, controllers, behavior trees).
-sentry_localization: Localization using AMCL or robot_localization.
-sentry_mapping: Map generation using SLAM Toolbox.
-sentry_bringup: System integration and launch files.
-sentry_msgs: Custom messages, services, and actions.
+A modular navigation system built with ROS 2 Jazzy and Nav2 for autonomous robot navigation.
+
+Overview
+
+This workspace contains packages for simulation, localization, mapping, navigation, and system integration, designed for modular development and testing with Gazebo Harmonic and Nav2.
 
 Prerequisites
 
