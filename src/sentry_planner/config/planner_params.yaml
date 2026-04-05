@@ -36,10 +36,21 @@ sentry_planner:
       allocate_num: 100000
       check_num: 50
 
+    # --- 模式选择 ---
+    planner_mode: "minco"          # "bspline" | "minco"
+    controller_mode: "mpc"         # "pd" | "mpc"
+
     # --- 轨迹跟踪控制器参数 ---
     controller:
       frequency: 50.0              # 控制频率 50Hz
-      kp: 2.0                      # 位置误差增益
+      kp: 2.0                      # PD 位置误差增益
+
+    # --- MPC 参数 ---
+    mpc:
+      horizon: 10                  # 预测步数
+      q_pos: 10.0                  # 位置跟踪权重
+      q_vel: 1.0                   # 速度跟踪权重
+      r_acc: 0.1                   # 控制量 (加速度) 权重
 
     # --- BSpline 优化参数 ---
     optimization:

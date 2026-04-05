@@ -18,7 +18,10 @@ find_package(NLopt REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 add_executable(sentry_planner_node src/sentry_planner_node.cpp)
-target_include_directories(sentry_planner_node PRIVATE ${EIGEN3_INCLUDE_DIRS} ${NLOPT_INCLUDE_DIRS})
+target_include_directories(sentry_planner_node PRIVATE
+  ${EIGEN3_INCLUDE_DIRS} ${NLOPT_INCLUDE_DIRS}
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 ament_target_dependencies(sentry_planner_node
   rclcpp nav_msgs geometry_msgs sensor_msgs visualization_msgs tf2_ros
   plan_env path_searching bspline bspline_opt
