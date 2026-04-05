@@ -155,7 +155,15 @@ namespace fast_planner
             vector<double> durations;
             if (init_search)
             {
-                inputs.push_back(start_acc_);
+                // Use all acceleration directions for init_search (not just start_acc_)
+                // This is critical when start_vel=0 and start_acc=0, otherwise
+                // the robot stays in the same voxel and all primitives are rejected.
+                for (double ax = -max_acc_; ax <= max_acc_ + 1e-3; ax += max_acc_ * res)
+                    for (double ay = -max_acc_; ay <= max_acc_ + 1e-3; ay += max_acc_ * res)
+                    {
+                        um << ax, ay;
+                        inputs.push_back(um);
+                    }
                 for (double tau = time_res_init * init_max_tau_; tau <= init_max_tau_ + 1e-3;
                      tau += time_res_init * init_max_tau_)
                     durations.push_back(tau);

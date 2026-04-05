@@ -59,6 +59,8 @@ struct MappingParameters
 
   double resolution_, resolution_inv_;
   double obstacles_inflation_;
+  double max_slope_rad_;    // 最大可通行坡度 (rad)
+  double step_height_max_;  // 最大可通行台阶高度 (m)
   bool show_esdf_time_, show_occ_time_;
 
   string frame_id_;
@@ -77,6 +79,11 @@ struct MappingData
   std::vector<double> distance_buffer_all_;
 
   std::vector<double> distance_buffer_;
+
+  // 高程图: 每个 2D 格子的地面高度
+  std::vector<float> elevation_buffer_;
+  // 坡度判定结果: 0=可通行, 1=障碍 (陡坡/台阶/墙壁)
+  std::vector<char> slope_obstacle_buffer_;
 
   std::vector<double> tmp_buffer1_;
   Eigen::Vector2i local_bound_min_, local_bound_max_;
@@ -112,23 +119,23 @@ public:
   void getSurroundPts(const Eigen::Vector2d &pos, Eigen::Vector2d pts[2][2], Eigen::Vector2d &diff);
   void initMap(std::shared_ptr<rclcpp::Node> nh);
 
-  inline double getDistance(const Eigen::Vector2d &pos);
+  void posToIndex(const Eigen::Vector2d &pos, Eigen::Vector2i &id);
+  void indexToPos(const Eigen::Vector2i &id, Eigen::Vector2d &pos);
+  bool isInMap(const Eigen::Vector2d &pos);
 
-  inline int getInflateOccupancy(Eigen::Vector2d pos);
-  inline void posToIndex(const Eigen::Vector2d &pos, Eigen::Vector2i &id);
-  inline void indexToPos(const Eigen::Vector2i &id, Eigen::Vector2d &pos);
-  inline bool isInMap(const Eigen::Vector2d &pos);
-
-  inline void boundIndex(Eigen::Vector2i &id);
-  inline bool isInMap(const Eigen::Vector2i &idx);
-  inline int toAddress(const Eigen::Vector2i &id);
+  void boundIndex(Eigen::Vector2i &id);
+  bool isInMap(const Eigen::Vector2i &idx);
+  int toAddress(const Eigen::Vector2i &id);
   inline void setLocalMap(const int num)
   {
     if (num > md_.global_map_num || num < 0)
       return;
     md_.current_global_map = num;
   };
-  inline int toAddress(int &x, int &y);
+  int toAddress(int &x, int &y);
+
+  double getDistance(const Eigen::Vector2d &pos);
+  int getInflateOccupancy(Eigen::Vector2d pos);
 
 private:
   // Subscriber with tf2 message_filter
@@ -149,11 +156,14 @@ private:
   laser_geometry::LaserProjection projectoir_;
   // shared_ptr<message_filters::Subscriber<sensor_msgs::msg::LaserScan>> laser_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  bool use_cloud_input_ = false;  // true = PointCloud2, false = LaserScan
 
   rclcpp::TimerBase::SharedPtr esdf_timer_, vis_timer_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_, esdf_pub_;
   void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom);
   void laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &laser_msg);
+  void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg);
 
   void publishMap();
   void publishESDF();
@@ -174,73 +184,4 @@ private:
   }
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
-inline void SDFMap::posToIndex(const Eigen::Vector2d &pos, Eigen::Vector2i &id)
-{
-  for (int i = 0; i < 2; ++i)
-    id(i) = floor((pos(i) - mp_.map_origin_(i)) * mp_.resolution_inv_);
-}
-inline void SDFMap::indexToPos(const Eigen::Vector2i &id, Eigen::Vector2d &pos)
-{
-  for (int i = 0; i < 2; ++i)
-    pos(i) = (id(i) + 0.5) * mp_.resolution_ + mp_.map_origin_(i);
-}
-inline int SDFMap::toAddress(const Eigen::Vector2i &id)
-{
-  return id(0) * mp_.map_voxel_num_(1) + id(1);
-}
-
-inline int SDFMap::toAddress(int &x, int &y)
-{
-  return x * mp_.map_voxel_num_(1) + y;
-}
-inline void SDFMap::boundIndex(Eigen::Vector2i &id)
-{
-  Eigen::Vector2i id1;
-  id1(0) = max(min(id(0), mp_.map_voxel_num_(0) - 1), 0);
-  id1(1) = max(min(id(1), mp_.map_voxel_num_(1) - 1), 0);
-  id = id1;
-}
-inline bool SDFMap::isInMap(const Eigen::Vector2i &idx)
-{
-  if (idx(0) < 0 || idx(1) < 0)
-  {
-    return false;
-  }
-  if (idx(0) > mp_.map_voxel_num_(0) - 1 || idx(1) > mp_.map_voxel_num_(1) - 1)
-  {
-    return false;
-  }
-  return true;
-}
-inline double SDFMap::getDistance(const Eigen::Vector2d &pos)
-{
-  Eigen::Vector2i id;
-  posToIndex(pos, id);
-  boundIndex(id);
-
-  return md_.distance_buffer_all_[toAddress(id)];
-}
-inline bool SDFMap::isInMap(const Eigen::Vector2d &pos)
-{
-  if (pos(0) < mp_.map_min_boundary_(0) + 1e-4 || pos(1) < mp_.map_min_boundary_(1) + 1e-4)
-  {
-    // cout << "less than min range!" << endl;
-    return false;
-  }
-  if (pos(0) > mp_.map_max_boundary_(0) - 1e-4 || pos(1) > mp_.map_max_boundary_(1) - 1e-4)
-  {
-    return false;
-  }
-  return true;
-}
-inline int SDFMap::getInflateOccupancy(Eigen::Vector2d pos)
-{
-  if (!isInMap(pos))
-    return -1;
-
-  Eigen::Vector2i id;
-  posToIndex(pos, id);
-
-  return int(md_.is_occupancy(toAddress(id)));
-}
 #endif
