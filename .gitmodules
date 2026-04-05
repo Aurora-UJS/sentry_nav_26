@@ -1,6 +1,6 @@
 [submodule "src/small_point_lio"]
 	path = src/small_point_lio
-	url = https://github.com/Yancey2023/small_point_lio.git
+	url = https://github.com/Aurora-UJS/small_point_lio.git
 [submodule "src/rm_sim_26"]
 	path = src/rm_sim_26
 	url = https://github.com/Neomelt/rm_sim_26.git
