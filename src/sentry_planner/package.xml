@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>sentry_planner</name>
+  <version>0.0.1</version>
+  <description>Sentry navigation planner node: plan_env + KinodynamicAstar + BSpline optimization</description>
+  <maintainer email="neomelt@example.com">Neomelt</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>plan_env</depend>
+  <depend>path_searching</depend>
+  <depend>bspline</depend>
+  <depend>bspline_opt</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
