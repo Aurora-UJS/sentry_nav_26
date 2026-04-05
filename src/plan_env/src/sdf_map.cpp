@@ -272,6 +272,8 @@ void SDFMap::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom)
 {
 	md_.laser_pos_(0) = odom->pose.pose.position.x;
 	md_.laser_pos_(1) = odom->pose.pose.position.y;
+	// 夹紧 Z 范围，防止 LIO 在坡道上 Z 发散 (RMUC 赛场高低差 < 1m)
+	md_.laser_z_ = std::clamp(odom->pose.pose.position.z, -1.5, 1.5);
 	md_.laser_q_ = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
 									  odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
 	md_.has_odom_ = true;
@@ -380,6 +382,10 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 
 	double min_h = node_->get_parameter("sdf_map.cloud_min_height").as_double();
 	double max_h = node_->get_parameter("sdf_map.cloud_max_height").as_double();
+
+	// 高度过滤相对机器人当前 Z 位置 (适应坡道/高低差地形)
+	min_h += md_.laser_z_;
+	max_h += md_.laser_z_;
 
 	pcl::PointCloud<pcl::PointXYZ> cloud_3d;
 	pcl::fromROSMsg(*cloud_msg, cloud_3d);

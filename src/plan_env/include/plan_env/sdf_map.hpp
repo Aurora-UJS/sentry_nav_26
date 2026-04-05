@@ -70,6 +70,7 @@ struct MappingData
 {
   Eigen::Vector2d laser_pos_, last_laser_pos_;
   Eigen::Quaterniond laser_q_, last_laser_q_;
+  double laser_z_ = 0.0;  // 机器人当前 Z 高度 (odom 系)
 
   bool has_odom_, has_cloud_;
   std::vector<char> occupancy_buffer_inflate_;
