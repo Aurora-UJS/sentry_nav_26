@@ -1,44 +1,33 @@
+"""
+sentry_bringup 主 launch 文件
+
+当前阶段: 只启动仿真 + RViz2
+TODO: 后续阶段逐步加入 localization、navigation
+"""
+
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
 
 def generate_launch_description():
-    simulation_launch = os.path.join(
-        get_package_share_directory("sentry_sim"), "launch", "simulation.launch.py"
-    )
-    localization_launch = os.path.join(
-        get_package_share_directory("sentry_localization"),
+    # 使用 sim_test launch 作为默认入口
+    sim_test_launch = os.path.join(
+        get_package_share_directory("sentry_bringup"),
         "launch",
-        "localization.launch.py",
-    )
-    navigation_launch = os.path.join(
-        get_package_share_directory("sentry_nav"), "launch", "navigation.launch.py"
+        "sim_test.launch.py",
     )
 
     return LaunchDescription(
         [
-            IncludeLaunchDescription(PythonLaunchDescriptionSource(simulation_launch)),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(localization_launch)
+            DeclareLaunchArgument(
+                "use_sim_time", default_value="true", description="Use sim time"
             ),
-            IncludeLaunchDescription(PythonLaunchDescriptionSource(navigation_launch)),
-            Node(
-                package="rviz2",
-                executable="rviz2",
-                name="rviz2",
-                output="screen",
-                arguments=[
-                    "-d",
-                    os.path.join(
-                        get_package_share_directory("sentry_bringup"),
-                        "config",
-                        "nav2_rviz_config.rviz",
-                    ),
-                ],
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(sim_test_launch),
+                launch_arguments={"use_sim_time": "true"}.items(),
             ),
         ]
     )

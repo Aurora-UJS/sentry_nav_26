@@ -1,0 +1,309 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Sensor1
+        - /Planning1
+      Splitter Ratio: 0.55
+    Tree Height: 550
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    # ======================== 基础 ========================
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Plane Cell Count: 50
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Color: 100; 100; 100
+      Reference Frame: <Fixed Frame>
+      Value: true
+
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Marker Scale: 0.3
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Update Interval: 0.1
+      Frames:
+        All Enabled: false
+        base_link:
+          Value: true
+        odom:
+          Value: true
+        map:
+          Value: true
+        livox_lidar:
+          Value: true
+      Value: true
+
+    - Alpha: 0.6
+      Class: rviz_default_plugins/RobotModel
+      Description Source: Topic
+      Description Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Name: RobotModel
+      Visual Enabled: true
+      Value: true
+
+    # ======================== 传感器 ========================
+    - Class: rviz_common/Group
+      Displays:
+        - Alpha: 0.8
+          Autocompute Intensity Bounds: true
+          Autocompute Value Bounds:
+            Max Value: 3
+            Min Value: -0.5
+            Value: true
+          Axis: Z
+          Channel Name: z
+          Class: rviz_default_plugins/PointCloud2
+          Color: 0; 255; 0
+          Color Transformer: AxisColor
+          Decay Time: 0
+          Enabled: true
+          Max Color: 255; 255; 255
+          Min Color: 0; 0; 0
+          Name: RegisteredCloud
+          Position Transformer: XYZ
+          Selectable: false
+          Size (Pixels): 2
+          Size (m): 0.03
+          Style: Points
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Best Effort
+            Value: /cloud_registered
+          Use Fixed Frame: true
+          Use rainbow: true
+          Value: true
+
+        - Alpha: 0.3
+          Autocompute Intensity Bounds: true
+          Class: rviz_default_plugins/PointCloud2
+          Color: 255; 255; 0
+          Color Transformer: FlatColor
+          Decay Time: 0
+          Enabled: false
+          Name: LivoxRaw
+          Position Transformer: XYZ
+          Selectable: false
+          Size (Pixels): 1
+          Size (m): 0.01
+          Style: Points
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Best Effort
+            Value: /livox/lidar
+          Use Fixed Frame: true
+          Value: false
+      Enabled: true
+      Name: Sensor
+
+    # ======================== 定位 ========================
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: Odometry
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /Odometry
+      Covariance:
+        Value: false
+      Keep: 50
+      Position Tolerance: 0.1
+      Angle Tolerance: 0.1
+      Axes Length: 0.3
+      Axes Radius: 0.03
+      Shape:
+        Value: Axes
+      Value: true
+
+    # ======================== 规划 ========================
+    - Class: rviz_common/Group
+      Displays:
+        # 2D 占据栅格 (障碍物点)
+        - Alpha: 0.9
+          Autocompute Intensity Bounds: true
+          Class: rviz_default_plugins/PointCloud2
+          Color: 255; 50; 50
+          Color Transformer: FlatColor
+          Decay Time: 0
+          Enabled: true
+          Name: OccupancyMap
+          Position Transformer: XYZ
+          Selectable: false
+          Size (Pixels): 4
+          Size (m): 0.05
+          Style: Squares
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /sdf_map/occupancy
+          Use Fixed Frame: true
+          Value: true
+
+        # ESDF 距离场
+        - Alpha: 0.4
+          Autocompute Intensity Bounds: false
+          Class: rviz_default_plugins/PointCloud2
+          Color: 255; 255; 255
+          Color Transformer: Intensity
+          Channel Name: intensity
+          Decay Time: 0
+          Enabled: true
+          Invert Rainbow: false
+          Max Color: 255; 255; 255
+          Max Intensity: 1
+          Min Color: 0; 0; 0
+          Min Intensity: 0
+          Name: ESDF
+          Position Transformer: XYZ
+          Selectable: false
+          Size (Pixels): 2
+          Size (m): 0.05
+          Style: Squares
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /sdf_map/esdf
+          Use Fixed Frame: true
+          Use rainbow: true
+          Value: true
+
+        # 规划路径
+        - Class: rviz_default_plugins/Path
+          Enabled: true
+          Name: PlannedPath
+          Topic:
+            Depth: 1
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /planning/trajectory
+          Color: 0; 255; 0
+          Alpha: 1
+          Buffer Length: 1
+          Line Style:
+            Line Width: 0.06
+            Value: Billboards
+          Offset:
+            X: 0
+            Y: 0
+            Z: 0.05
+          Pose Style: None
+          Value: true
+
+        # 轨迹 Marker
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: TrajectoryMarkers
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /planning/trajectory_markers
+          Value: true
+      Enabled: true
+      Name: Planning
+
+  Enabled: true
+  Global Options:
+    Background Color: 30; 30; 30
+    Fixed Frame: odom
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Value: /clicked_point
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 20
+      Focal Point:
+        X: 3.4
+        Y: 9.5
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 0.9
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 0.5
+    Saved:
+      - Class: rviz_default_plugins/TopDownOrtho
+        Name: TopDown
+        Near Clip Distance: 0.01
+        Scale: 30
+        X: 3.4
+        Y: 9.5
+      - Class: rviz_default_plugins/Orbit
+        Distance: 8
+        Focal Point:
+          X: 0
+          Y: 0
+          Z: 0
+        Name: FollowRobot
+        Pitch: 0.5
+        Target Frame: base_link
+        Yaw: 0
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1000
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Selection:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1400
+  X: 50
+  Y: 50
