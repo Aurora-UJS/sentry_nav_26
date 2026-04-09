@@ -272,8 +272,8 @@ void SDFMap::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom)
 {
 	md_.laser_pos_(0) = odom->pose.pose.position.x;
 	md_.laser_pos_(1) = odom->pose.pose.position.y;
-	// 夹紧 Z 范围，防止 LIO 在坡道上 Z 发散 (RMUC 赛场高低差 < 1m)
-	md_.laser_z_ = std::clamp(odom->pose.pose.position.z, -1.5, 1.5);
+	// 夹紧 Z 范围，防止 LIO 在坡道上 Z 发散 (RMUC 赛场高低差 < 0.5m)
+	md_.laser_z_ = std::clamp(odom->pose.pose.position.z, -0.5, 0.5);
 	md_.laser_q_ = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
 									  odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
 	md_.has_odom_ = true;
