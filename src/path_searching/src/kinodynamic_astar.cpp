@@ -82,7 +82,6 @@ namespace fast_planner
         else
             expanded_nodes_.insert(cur_node->index, cur_node);
 
-        PathNodePtr neighbor = NULL;
         PathNodePtr terminate_node = NULL;
         bool init_search = init;
         const int tolerance = ceil(1 / resolution_);
@@ -462,6 +461,7 @@ namespace fast_planner
     int KinodynamicAstar::timeToIndex(double time)
     {
         int idx = floor((time - time_origin_) * inv_time_resolution_);
+        return idx;
     }
     vector<double> KinodynamicAstar::cubic(double a, double b, double c, double d)
     {
