@@ -3,3 +3,6 @@ install/
 log/
 .vscode/
 .cache/
+.clangd
+CLAUDE.md
+compile_commands.json
