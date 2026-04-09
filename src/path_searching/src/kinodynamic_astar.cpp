@@ -44,7 +44,16 @@ namespace fast_planner
         lambda_heu_ = node_->declare_parameter<double>("search.lambda_heu", 5.0);
         allocate_num_ = node_->declare_parameter<int>("search.allocate_num", 100000);
         check_num_ = node_->declare_parameter<int>("search.check_num", 50);
+        robot_radius_ = node_->declare_parameter<double>("search.robot_radius", 0.3);
         tie_breaker_ = 1.0 + 1.0 / 10000;
+
+        // 预计算 footprint 采样点偏移: 中心 + 上下左右 4 个点
+        footprint_offsets_.clear();
+        footprint_offsets_.push_back(Eigen::Vector2d(0, 0));
+        footprint_offsets_.push_back(Eigen::Vector2d( robot_radius_, 0));
+        footprint_offsets_.push_back(Eigen::Vector2d(-robot_radius_, 0));
+        footprint_offsets_.push_back(Eigen::Vector2d(0,  robot_radius_));
+        footprint_offsets_.push_back(Eigen::Vector2d(0, -robot_radius_));
     }
     int KinodynamicAstar::search(Eigen::Vector2d start_pt, Eigen::Vector2d start_v, Eigen::Vector2d start_a,
                                  Eigen::Vector2d end_pt, Eigen::Vector2d end_v, bool init, bool dynamic, double time_start)
@@ -232,7 +241,18 @@ namespace fast_planner
                         double dt = tau * double(k) / double(check_num_);
                         stateTransit(cur_state, xt, um, dt);
                         pos = xt.head(2);
-                        if (edt_environment_->sdf_map_->getInflateOccupancy(pos) == 1 || edt_environment_->sdf_map_->isInMap(pos) != true)
+                        bool fp_occ = false;
+                        for (const auto &offset : footprint_offsets_)
+                        {
+                            Eigen::Vector2d fp = pos + offset;
+                            if (edt_environment_->sdf_map_->getInflateOccupancy(fp) == 1 ||
+                                !edt_environment_->sdf_map_->isInMap(fp))
+                            {
+                                fp_occ = true;
+                                break;
+                            }
+                        }
+                        if (fp_occ)
                         {
                             is_occ = true;
                             break;
@@ -429,9 +449,12 @@ namespace fast_planner
             // if (edt_environment_->evaluateCoarseEDT(coord, -1.0) <= margin_) {
             //   return false;
             // }
-            if (edt_environment_->sdf_map_->getInflateOccupancy(coord) == 1)
+            for (const auto &offset : footprint_offsets_)
             {
-                return false;
+                Eigen::Vector2d fp = coord + offset;
+                if (edt_environment_->sdf_map_->getInflateOccupancy(fp) == 1 ||
+                    !edt_environment_->sdf_map_->isInMap(fp))
+                    return false;
             }
         }
         coef_shot_ = coef;

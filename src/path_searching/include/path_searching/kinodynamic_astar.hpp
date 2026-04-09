@@ -147,6 +147,8 @@ namespace fast_planner
         double w_time_, horizon_, lambda_heu_;
         double max_tau_, init_max_tau_;
         double max_vel_, max_acc_;
+        double robot_radius_ = 0.3;
+        std::vector<Eigen::Vector2d> footprint_offsets_;
         bool has_path_ = false;
 
         Eigen::Vector2d start_vel_, end_vel_, start_acc_;

@@ -56,6 +56,32 @@ public:
         bspline_opt_->setParam(node_ptr);
         bspline_opt_->setEnvironment(edt_env_);
 
+        // --- Init MINCO optimizer (模式B) ---
+        this->declare_parameter<double>("minco_opt.lambda_smooth", 0.1);
+        this->declare_parameter<double>("minco_opt.lambda_col",    8.0);
+        this->declare_parameter<double>("minco_opt.lambda_feas",   0.001);
+        this->declare_parameter<double>("minco_opt.dist0",         0.05);
+        this->declare_parameter<double>("minco_opt.robot_radius",  0.3);
+        this->declare_parameter<int>   ("minco_opt.num_samples",   8);
+        this->declare_parameter<int>   ("minco_opt.max_iter",      200);
+        this->declare_parameter<double>("minco_opt.max_time_ms",   20.0);
+        {
+            double mv = 3.0, ma = 3.0;
+            this->get_parameter("search.max_vel", mv);
+            this->get_parameter("search.max_acc", ma);
+            minco_traj_.setOptimizer(
+                edt_env_.get(),
+                this->get_parameter("minco_opt.lambda_smooth").as_double(),
+                this->get_parameter("minco_opt.lambda_col").as_double(),
+                this->get_parameter("minco_opt.lambda_feas").as_double(),
+                this->get_parameter("minco_opt.dist0").as_double(),
+                mv, ma,
+                this->get_parameter("minco_opt.robot_radius").as_double(),
+                this->get_parameter("minco_opt.num_samples").as_int(),
+                this->get_parameter("minco_opt.max_iter").as_int(),
+                this->get_parameter("minco_opt.max_time_ms").as_double() / 1000.0);
+        }
+
         // --- Mode selection ---
         this->declare_parameter<std::string>("planner_mode", "minco");    // "bspline" | "minco"
         this->declare_parameter<std::string>("controller_mode", "mpc");   // "pd" | "mpc"
@@ -137,6 +163,14 @@ private:
     {
         // Clamp to local ESDF range
         Eigen::Vector2d diff = goal_pt - current_pos_;
+
+        // Already at goal — no need to re-plan
+        const double goal_tolerance = 0.4;
+        if (diff.norm() < goal_tolerance) {
+            RCLCPP_INFO(this->get_logger(), "Already within %.2fm of goal, skipping plan", goal_tolerance);
+            return;
+        }
+
         double local_range = 7.5;
         this->get_parameter("sdf_map.local_update_range_x", local_range);
         local_range -= 0.5;
@@ -191,7 +225,8 @@ private:
             Eigen::Vector2d end_vel = (start_end_derivatives.size() >= 2) ? start_end_derivatives[1] : Eigen::Vector2d::Zero();
 
             minco_traj_.setup(point_set, start_vel, Eigen::Vector2d::Zero(),
-                              end_vel, Eigen::Vector2d::Zero(), max_vel, max_acc);
+                              end_vel, Eigen::Vector2d::Zero(), max_vel, max_acc,
+                              this->now().seconds());
             traj_duration_ = minco_traj_.getDuration();
             use_minco_ = true;
         }

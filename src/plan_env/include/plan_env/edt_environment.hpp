@@ -37,6 +37,10 @@ namespace fast_planner
         void evaluateEDTWithGrad(const Eigen::Vector2d &pos, double time,
                                  double &dist, Eigen::Vector2d &grad);
         double evaluateCoarseEDT(Eigen::Vector2d &pos, double time);
+        bool hasDynamicObjects() const
+        {
+            return obj_prediction_ != nullptr && !obj_prediction_->empty();
+        }
         void getMapRegion(Eigen::Vector2d &ori, Eigen::Vector2d &size)
         {
             sdf_map_->getRegion(ori, size);

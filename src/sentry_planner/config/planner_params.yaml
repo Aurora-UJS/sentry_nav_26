@@ -14,7 +14,7 @@ sentry_planner:
       map_size_x: 30.0              # RMUC 赛场 ~15x28m, 留余量
       map_size_y: 30.0
       resolusion_: 0.05             # 5cm 分辨率 (600x600=360K 格子)
-      obstacles_inflation: 0.15     # 膨胀半径 15cm
+      obstacles_inflation: 0.05     # 仅做地图噪声平滑，车体安全由 footprint 检测负责
       max_slope_deg: 17.0           # 最大可通行坡度 17° (RMUC 赛场 15° + 余量)
       step_height_max: 0.08         # 最大可通行台阶高度 8cm
       local_map_margin: 10
@@ -35,6 +35,7 @@ sentry_planner:
       lambda_heu: 5.0
       allocate_num: 100000
       check_num: 50
+      robot_radius: 0.3            # 车体半径，footprint 碰撞检测用
 
     # --- 模式选择 ---
     planner_mode: "minco"          # "bspline" | "minco"
@@ -62,7 +63,7 @@ sentry_planner:
       lambda6: -1.0
       lambda7: 100.0
       lambda8: -1.0
-      dist0: 0.5                   # 安全距离 0.5m
+      dist0: 0.42                  # 安全距离 = inflation + 控制余量
       max_vel: 3.0
       max_acc: 3.0
       max_iteration_num1: 2
@@ -76,3 +77,14 @@ sentry_planner:
       algorithm1: 11
       algorithm2: 15
       order: 3
+
+    # --- MINCO 梯度优化参数 ---
+    minco_opt:
+      lambda_smooth: 0.1           # 平滑权重 (MINCO 天然平滑，比 bspline 小)
+      lambda_col: 8.0              # 碰撞代价权重 (与 bspline 对齐)
+      lambda_feas: 0.001           # 动力学可行性惩罚
+      robot_radius: 0.3            # 车体半径，用于 footprint 碰撞检测
+      dist0: 0.05                  # ESDF 安全阈值：footprint 点距墙小于此值才产生代价（小值，安全由 robot_radius 保证）
+      num_samples: 8               # 每段采样点数
+      max_iter: 200                # L-BFGS 最大迭代次数
+      max_time_ms: 20.0            # 最大优化时间 (ms)
