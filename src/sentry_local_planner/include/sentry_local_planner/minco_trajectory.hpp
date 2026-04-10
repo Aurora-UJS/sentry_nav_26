@@ -193,6 +193,7 @@ private:
     Eigen::Vector2d q0_fixed_, qN_fixed_;
     std::vector<double> best_var_;
     double min_cost_ = 1e18;
+    bool coarse_stage_ = false;  // 两阶段优化: true=粗优化(垂直梯度), false=细优化(全梯度)
 
     // ==================== 优化核心 ====================
 
@@ -215,31 +216,54 @@ private:
         best_var_ = x;
         min_cost_ = 1e18;
 
+        // 盒约束: 每个路径点在初始值 ±5m 范围内
+        std::vector<double> lb(2*M), ub(2*M);
+        for (int i = 0; i < 2*M; ++i)
+        {
+            lb[i] = x[i] - 5.0;
+            ub[i] = x[i] + 5.0;
+        }
+
         try
         {
-            nlopt::opt opt(nlopt::LD_LBFGS, 2 * M);
-            opt.set_min_objective(nloptCallback, this);
-            opt.set_maxeval(max_iter_);
-            opt.set_maxtime(max_time_s_);
-            opt.set_xtol_rel(1e-4);
-
-            // 盒约束: 每个路径点在初始值 ±5m 范围内
-            std::vector<double> lb(2*M), ub(2*M);
-            for (int i = 0; i < 2*M; ++i)
+            // Stage 1: 粗优化 — 碰撞梯度只保留垂直于轨迹方向的分量
+            // 确定轨迹整体形状，避免沿轨迹方向推移导致异常速度
             {
-                lb[i] = x[i] - 5.0;
-                ub[i] = x[i] + 5.0;
+                coarse_stage_ = true;
+                nlopt::opt opt(nlopt::LD_LBFGS, 2 * M);
+                opt.set_min_objective(nloptCallback, this);
+                opt.set_maxeval(max_iter_ / 2);
+                opt.set_maxtime(max_time_s_ * 0.4);
+                opt.set_xtol_rel(1e-3);
+                opt.set_lower_bounds(lb);
+                opt.set_upper_bounds(ub);
+                double cost;
+                opt.optimize(x, cost);
             }
-            opt.set_lower_bounds(lb);
-            opt.set_upper_bounds(ub);
+        }
+        catch (const std::exception &) {}
 
-            double cost;
-            opt.optimize(x, cost);
-        }
-        catch (const std::exception &)
+        // 用 Stage 1 最优解作为 Stage 2 起点
+        x = best_var_;
+        min_cost_ = 1e18;
+
+        try
         {
-            // 超时或精度收敛均为正常退出，使用 best_var_ 中的最优解
+            // Stage 2: 细优化 — 使用完整碰撞梯度，精调轨迹
+            {
+                coarse_stage_ = false;
+                nlopt::opt opt(nlopt::LD_LBFGS, 2 * M);
+                opt.set_min_objective(nloptCallback, this);
+                opt.set_maxeval(max_iter_);
+                opt.set_maxtime(max_time_s_ * 0.6);
+                opt.set_xtol_rel(1e-4);
+                opt.set_lower_bounds(lb);
+                opt.set_upper_bounds(ub);
+                double cost;
+                opt.optimize(x, cost);
+            }
         }
+        catch (const std::exception &) {}
 
         // 用最优解重建轨迹
         std::vector<Eigen::Vector2d> opt_wp;
@@ -428,6 +452,8 @@ private:
                 Eigen::Vector2d pos = segments_[i].pos(tau);
 
                 // 反传系数 (只依赖段时长，与 footprint 无关)
+                // dp(τ)/dq_end = τ³α + τ⁴β + τ⁵γ
+                // dp(τ)/dq_start = 1 - dp(τ)/dq_end (因 c0=q_start 贡献 "1")
                 double dpq_end   = tau*tau*tau * alpha + tau*tau*tau*tau * beta +
                                    tau*tau*tau*tau*tau * gamma;
                 double dpq_start = 1.0 - dpq_end;
@@ -461,8 +487,20 @@ private:
                         double pen = dist - dist0_;
                         cost += pen * pen;
 
-                        // footprint 点是 center + 固定偏移，梯度直接透传到 center
-                        Eigen::Vector2d dJdpos = 2.0 * pen * esdf_grad;
+                        // 粗优化: 碰撞梯度去除沿轨迹方向分量，只保留垂直分量
+                        Eigen::Vector2d grad_used = esdf_grad;
+                        if (coarse_stage_)
+                        {
+                            Eigen::Vector2d vel = segments_[i].vel(tau);
+                            double vn = vel.norm();
+                            if (vn > 1e-6)
+                            {
+                                Eigen::Vector2d tangent = vel / vn;
+                                grad_used -= grad_used.dot(tangent) * tangent;
+                            }
+                        }
+
+                        Eigen::Vector2d dJdpos = 2.0 * pen * grad_used;
 
                         int end_idx   = i;
                         int start_idx = i - 1;

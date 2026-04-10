@@ -1,4 +1,4 @@
-"""sentry_planner launch: 规划节点"""
+"""sentry_local_planner launch: 规划节点"""
 
 import os
 from launch import LaunchDescription
@@ -12,15 +12,15 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time", default="true")
 
     planner_params = os.path.join(
-        get_package_share_directory("sentry_planner"),
+        get_package_share_directory("sentry_local_planner"),
         "config",
         "planner_params.yaml",
     )
 
     planner_node = Node(
-        package="sentry_planner",
-        executable="sentry_planner_node",
-        name="sentry_planner",
+        package="sentry_local_planner",
+        executable="sentry_local_planner_node",
+        name="sentry_local_planner",
         output="screen",
         parameters=[planner_params, {"use_sim_time": use_sim_time}],
     )

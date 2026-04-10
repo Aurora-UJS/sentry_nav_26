@@ -21,15 +21,15 @@
 #include <bspline/non_uniform_bspline.hpp>
 #include <bspline_opt/bspline_optimizer.hpp>
 
-#include <sentry_planner/minco_trajectory.hpp>
-#include <sentry_planner/mpc_controller.hpp>
+#include <sentry_local_planner/minco_trajectory.hpp>
+#include <sentry_local_planner/mpc_controller.hpp>
 
 using namespace fast_planner;
 
-class SentryPlannerNode : public rclcpp::Node
+class SentryLocalPlannerNode : public rclcpp::Node
 {
 public:
-    SentryPlannerNode() : Node("sentry_planner")
+    SentryLocalPlannerNode() : Node("sentry_local_planner")
     {
         this->declare_parameter<std::string>("manager.odometry", "/Odometry");
     }
@@ -112,6 +112,26 @@ public:
         this->get_parameter("search.max_acc", mpc_cfg.max_acc);
         mpc_.setConfig(mpc_cfg);
 
+        // --- Replan safety check ---
+        // (reactive parameters kept for reference but 10Hz proactive replan is primary)
+
+        robot_radius_ = this->get_parameter("minco_opt.robot_radius").as_double();
+        footprint_offsets_ = {
+            Eigen::Vector2d(0, 0),
+            Eigen::Vector2d( robot_radius_, 0),
+            Eigen::Vector2d(-robot_radius_, 0),
+            Eigen::Vector2d(0,  robot_radius_),
+            Eigen::Vector2d(0, -robot_radius_),
+        };
+
+        // --- Spin (self-rotation for better LiDAR coverage) ---
+        this->declare_parameter<double>("controller.spin_rate", 3.0);
+        this->declare_parameter<double>("controller.narrow_passage_dist", 0.5);
+        this->declare_parameter<double>("controller.yaw_align_kp", 3.0);
+        spin_rate_ = this->get_parameter("controller.spin_rate").as_double();
+        narrow_passage_dist_ = this->get_parameter("controller.narrow_passage_dist").as_double();
+        yaw_align_kp_ = this->get_parameter("controller.yaw_align_kp").as_double();
+
         // --- Subscribers ---
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/Odometry", 10,
@@ -128,7 +148,19 @@ public:
 
         goal_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "/goal_pose", 10,
-            std::bind(&SentryPlannerNode::goalCallback, this, std::placeholders::_1));
+            std::bind(&SentryLocalPlannerNode::goalCallback, this, std::placeholders::_1));
+
+        global_path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
+            "/global_path", 10,
+            [this](const nav_msgs::msg::Path::SharedPtr msg) {
+                global_waypoints_.clear();
+                for (auto &pose : msg->poses)
+                    global_waypoints_.emplace_back(pose.pose.position.x, pose.pose.position.y);
+                current_waypoint_idx_ = 0;
+                has_global_path_ = !global_waypoints_.empty();
+                RCLCPP_INFO(this->get_logger(), "Received global path: %zu waypoints",
+                            global_waypoints_.size());
+            });
 
         // --- Publishers ---
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planning/trajectory", 10);
@@ -139,7 +171,14 @@ public:
         // --- Controller timer ---
         ctrl_timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0 / ctrl_freq),
-            std::bind(&SentryPlannerNode::controlLoop, this));
+            std::bind(&SentryLocalPlannerNode::controlLoop, this));
+
+        // --- 10Hz proactive replan timer ---
+        this->declare_parameter<double>("replan.frequency", 10.0);
+        double replan_freq = this->get_parameter("replan.frequency").as_double();
+        replan_timer_ = this->create_wall_timer(
+            std::chrono::duration<double>(1.0 / replan_freq),
+            std::bind(&SentryLocalPlannerNode::replanCallback, this));
 
         RCLCPP_INFO(this->get_logger(),
             "Planner initialized: mode=%s+%s, ctrl@%.0fHz",
@@ -223,9 +262,11 @@ private:
         {
             Eigen::Vector2d start_vel = (start_end_derivatives.size() >= 2) ? start_end_derivatives[0] : current_vel_;
             Eigen::Vector2d end_vel = (start_end_derivatives.size() >= 2) ? start_end_derivatives[1] : Eigen::Vector2d::Zero();
+            Eigen::Vector2d start_acc = (start_end_derivatives.size() >= 4) ? start_end_derivatives[2] : Eigen::Vector2d::Zero();
+            Eigen::Vector2d end_acc = (start_end_derivatives.size() >= 4) ? start_end_derivatives[3] : Eigen::Vector2d::Zero();
 
-            minco_traj_.setup(point_set, start_vel, Eigen::Vector2d::Zero(),
-                              end_vel, Eigen::Vector2d::Zero(), max_vel, max_acc,
+            minco_traj_.setup(point_set, start_vel, start_acc,
+                              end_vel, end_acc, max_vel, max_acc,
                               this->now().seconds());
             traj_duration_ = minco_traj_.getDuration();
             use_minco_ = true;
@@ -255,29 +296,100 @@ private:
                      traj_duration_, point_set.size());
     }
 
+    // ==================== 10Hz proactive replan ====================
+    void replanCallback()
+    {
+        if (!has_odom_ || !has_final_goal_)
+            return;
+
+        // 已到达最终目标附近，不重规划
+        if ((final_goal_ - current_pos_).norm() < 0.4)
+            return;
+
+        Eigen::Vector2d local_goal = final_goal_;
+
+        if (has_global_path_ && !global_waypoints_.empty())
+        {
+            // 前进 waypoint: 跳过已经过的
+            while (current_waypoint_idx_ < (int)global_waypoints_.size() - 1 &&
+                   (global_waypoints_[current_waypoint_idx_] - current_pos_).norm() < 1.0)
+                current_waypoint_idx_++;
+
+            local_goal = global_waypoints_[current_waypoint_idx_];
+        }
+
+        planToGoal(local_goal);
+    }
+
+    // ==================== Spin / narrow-passage alignment ====================
+    double computeAngularVelocity(double elapsed)
+    {
+        // 检查当前位置附近 ESDF 距离
+        if (sdf_map_->isInMap(current_pos_))
+        {
+            double center_dist = sdf_map_->getDistance(current_pos_);
+            if (center_dist < narrow_passage_dist_)
+            {
+                // 窄口: 停止自转，对齐底盘长轴与轨迹速度方向
+                Eigen::Vector2d vel_dir;
+                if (use_minco_)
+                    vel_dir = minco_traj_.getVelocity(elapsed);
+                else
+                    vel_dir = bspline_vel_.evaluateDeBoorT(elapsed).head(2);
+
+                if (vel_dir.norm() > 0.3)
+                {
+                    double desired_yaw = atan2(vel_dir(1), vel_dir(0));
+                    double yaw_err = desired_yaw - current_yaw_;
+                    // 归一化到 [-π, π]
+                    while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
+                    while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
+
+                    // 底盘对称: 转 180° 也是同样的截面，选最近的
+                    if (yaw_err > M_PI / 2.0) yaw_err -= M_PI;
+                    else if (yaw_err < -M_PI / 2.0) yaw_err += M_PI;
+
+                    return yaw_align_kp_ * yaw_err;
+                }
+                return 0.0;  // 速度太小，不转
+            }
+        }
+        return spin_rate_;  // 正常自转
+    }
+
     // ==================== Control loop ====================
     void controlLoop()
     {
-        if (!has_traj_ || !has_odom_)
+        if (!has_odom_)
             return;
+
+        // 无轨迹时仍保持自转
+        if (!has_traj_)
+        {
+            if (spin_rate_ != 0.0)
+            {
+                geometry_msgs::msg::Twist cmd;
+                cmd.angular.z = spin_rate_;
+                cmd_vel_pub_->publish(cmd);
+            }
+            return;
+        }
 
         double elapsed = (this->now() - traj_start_time_).seconds();
 
         if (elapsed >= traj_duration_)
         {
-            // Stop
-            cmd_vel_pub_->publish(geometry_msgs::msg::Twist());
+            // 轨迹结束，停止平移，保持自转
+            geometry_msgs::msg::Twist stop_cmd;
+            stop_cmd.angular.z = spin_rate_;
+            cmd_vel_pub_->publish(stop_cmd);
             has_traj_ = false;
 
-            // Re-plan toward final goal?
-            if (has_final_goal_ && (final_goal_ - current_pos_).norm() > 0.3) {
-                RCLCPP_INFO(this->get_logger(), "Segment done, %.1fm left, re-planning...",
-                    (final_goal_ - current_pos_).norm());
-                planToGoal(final_goal_);
-            } else {
+            if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 0.4) {
                 RCLCPP_INFO(this->get_logger(), "Goal reached!");
                 has_final_goal_ = false;
             }
+            // 若还有目标，replanCallback 会在下次 10Hz tick 自动重规划
             return;
         }
 
@@ -339,6 +451,9 @@ private:
         geometry_msgs::msg::Twist cmd;
         cmd.linear.x = cy * vel_cmd_odom(0) - sy * vel_cmd_odom(1);
         cmd.linear.y = sy * vel_cmd_odom(0) + cy * vel_cmd_odom(1);
+
+        // 自转 vs 窄口对齐
+        cmd.angular.z = computeAngularVelocity(elapsed);
         cmd_vel_pub_->publish(cmd);
     }
 
@@ -415,6 +530,9 @@ private:
     // ==================== Controller backends ====================
     double kp_ = 2.0;                       // PD gain
     double config_dt_ = 0.02;               // 控制周期
+    double spin_rate_ = 3.0;                // 自转角速度 (rad/s)
+    double narrow_passage_dist_ = 0.5;      // ESDF < 此值时切换为航向对齐
+    double yaw_align_kp_ = 3.0;             // 航向对齐 P 增益
     sentry_planner::MPCController mpc_;      // MPC
 
     // ==================== State ====================
@@ -430,19 +548,30 @@ private:
     Eigen::Vector2d final_goal_ = Eigen::Vector2d::Zero();
     bool has_final_goal_ = false;
 
+    // Replan
+    double robot_radius_ = 0.3;
+    std::vector<Eigen::Vector2d> footprint_offsets_;
+
+    // Global path tracking
+    std::vector<Eigen::Vector2d> global_waypoints_;
+    int current_waypoint_idx_ = 0;
+    bool has_global_path_ = false;
+
     // ==================== ROS ====================
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::TimerBase::SharedPtr ctrl_timer_;
+    rclcpp::TimerBase::SharedPtr replan_timer_;
 };
 
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<SentryPlannerNode>();
+    auto node = std::make_shared<SentryLocalPlannerNode>();
     node->initialize();
     rclcpp::spin(node);
     rclcpp::shutdown();
