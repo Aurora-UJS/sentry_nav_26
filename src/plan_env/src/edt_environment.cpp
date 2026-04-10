@@ -89,14 +89,53 @@ namespace fast_planner
                                              double time, double &dist,
                                              Eigen::Vector2d &grad)
     {
-        Eigen::Vector2d diff;
-        Eigen::Vector2d sur_pts[2][2];
-        sdf_map_->getSurroundPts(pos, sur_pts, diff);
+        evaluateEDTBiquadratic(pos, dist, grad);
+    }
 
-        double dists[2][2];
-        getSurroundDistance(sur_pts, dists);
+    double EDTEnvironment::getDistanceAtIndex(const Eigen::Vector2i &idx)
+    {
+        return sdf_map_->getDistanceByIndex(idx);
+    }
 
-        interpolateBilinear(dists, diff, dist, grad);
+    void EDTEnvironment::evaluateEDTBiquadratic(const Eigen::Vector2d &pos,
+                                                double &dist, Eigen::Vector2d &grad)
+    {
+        // 将 pos 转换为网格坐标 (连续)
+        Eigen::Vector2d pos_g = (pos - sdf_map_->getMapOrigin()) * resolution_inv_;
+        // 最近网格中心索引
+        int ix = (int)std::floor(pos_g(0));
+        int iy = (int)std::floor(pos_g(1));
+        double fx = pos_g(0) - ix;  // [0, 1) 小数部分
+        double fy = pos_g(1) - iy;
+
+        // 3x3 邻域: (ix-1..ix+1) x (iy-1..iy+1)
+        double d[3][3];
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+            {
+                Eigen::Vector2i idx(ix + dx, iy + dy);
+                d[dx+1][dy+1] = getDistanceAtIndex(idx);
+            }
+
+        // 二次插值基函数: B_{-1}(t)=0.5*(t-0.5)^2, B_0(t)=0.75-(t)^2, B_1(t)=0.5*(t+0.5)^2
+        // 等价于用 t = fx-0.5 的二次 B-spline 基
+        double tx = fx - 0.5, ty = fy - 0.5;
+        double wx[3] = { 0.5*(0.5 - tx)*(0.5 - tx), 0.75 - tx*tx, 0.5*(0.5 + tx)*(0.5 + tx) };
+        double wy[3] = { 0.5*(0.5 - ty)*(0.5 - ty), 0.75 - ty*ty, 0.5*(0.5 + ty)*(0.5 + ty) };
+        // 基函数导数
+        double dwx[3] = { -(0.5 - tx), -2.0*tx, (0.5 + tx) };
+        double dwy[3] = { -(0.5 - ty), -2.0*ty, (0.5 + ty) };
+
+        dist = 0.0;
+        grad.setZero();
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+            {
+                dist += wx[i] * wy[j] * d[i][j];
+                grad(0) += dwx[i] * wy[j] * d[i][j];
+                grad(1) += wx[i] * dwy[j] * d[i][j];
+            }
+        grad *= resolution_inv_;
     }
 
     double EDTEnvironment::evaluateCoarseEDT(Eigen::Vector2d &pos, double time)

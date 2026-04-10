@@ -36,6 +36,9 @@ namespace fast_planner
                                  double &value, Eigen::Vector2d &grad);
         void evaluateEDTWithGrad(const Eigen::Vector2d &pos, double time,
                                  double &dist, Eigen::Vector2d &grad);
+        double getDistanceAtIndex(const Eigen::Vector2i &idx);
+        void evaluateEDTBiquadratic(const Eigen::Vector2d &pos, double &dist,
+                                    Eigen::Vector2d &grad);
         double evaluateCoarseEDT(Eigen::Vector2d &pos, double time);
         bool hasDynamicObjects() const
         {
