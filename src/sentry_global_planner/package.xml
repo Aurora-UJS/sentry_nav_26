@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>sentry_global_planner</name>
+  <version>0.0.1</version>
+  <description>Sentry global planner: prior map ESDF + JPS / online ESDF proxy</description>
+  <maintainer email="neomelt@example.com">Neomelt</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>plan_env</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,11 @@
+sentry_global_planner:
+  ros__parameters:
+    manager:
+      odometry: "/Odometry"
+    global_map:
+      mode: "prior"               # "prior" = 先验PGM地图, "online" = 实时ESDF
+      yaml_path: ""               # prior 模式: 由 launch 传入绝对路径
+    jps:
+      esdf_weight: 2.0            # ESDF 代价权重: 越大路径越远离障碍
+      safety_dist: 0.3            # ESDF < 此值视为不可通行
+      waypoint_spacing: 1.0       # 简化后 waypoint 最小间距 (m)
