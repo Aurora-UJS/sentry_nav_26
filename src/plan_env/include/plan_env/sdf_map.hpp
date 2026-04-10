@@ -63,6 +63,11 @@ struct MappingParameters
   double step_height_max_;  // 最大可通行台阶高度 (m)
   bool show_esdf_time_, show_occ_time_;
 
+  // Log-odds 贝叶斯占据更新参数
+  double logodds_hit_, logodds_miss_;
+  double logodds_max_, logodds_min_;
+  double logodds_thresh_;
+
   string frame_id_;
 };
 
@@ -86,8 +91,12 @@ struct MappingData
   // 坡度判定结果: 0=可通行, 1=障碍 (陡坡/台阶/墙壁)
   std::vector<char> slope_obstacle_buffer_;
 
+  // Log-odds 累积值，0 = 未知
+  std::vector<float> logodds_buffer_;
+
   std::vector<double> tmp_buffer1_;
   Eigen::Vector2i local_bound_min_, local_bound_max_;
+  Eigen::Vector2i ring_offset_;  // 环形缓冲区偏移 (格子数)
   bool local_updated_, esdf_need_update_;
   double fuse_time_, esdf_time_, max_fuse_time_, max_esdf_time_;
   int update_num_;
@@ -136,6 +145,8 @@ public:
   int toAddress(int &x, int &y);
 
   double getDistance(const Eigen::Vector2d &pos);
+  double getDistanceByIndex(const Eigen::Vector2i &idx);
+  Eigen::Vector2d getMapOrigin() const;
   int getInflateOccupancy(Eigen::Vector2d pos);
 
 private:
@@ -174,7 +185,11 @@ private:
   void updateESDFCallback();
   void updateESDF2d();
 
+  void slideMapTo(const Eigen::Vector2d &new_center);
+  void clearRingSlice(int dim, int from, int to);
   void resetBuffer(Eigen::Vector2d min_pos, Eigen::Vector2d max_pos);
+  void raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end);
+  void thresholdLogodds();
   void publish_map()
   {
     // 发布消息

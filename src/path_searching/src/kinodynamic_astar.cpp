@@ -58,6 +58,8 @@ namespace fast_planner
     int KinodynamicAstar::search(Eigen::Vector2d start_pt, Eigen::Vector2d start_v, Eigen::Vector2d start_a,
                                  Eigen::Vector2d end_pt, Eigen::Vector2d end_v, bool init, bool dynamic, double time_start)
     {
+        // 刷新地图原点 (滑动窗口可能已移动)
+        edt_environment_->sdf_map_->getRegion(origin_, map_size_3d_);
 
         start_vel_ = start_v;
         start_acc_ = start_a;
@@ -739,6 +741,7 @@ namespace fast_planner
                 {
                     node = node->parent;
                     t += node->duration;
+                    if (t < 0) t = 0;  // clamp to prevent backward stateTransit
                 }
             }
         }

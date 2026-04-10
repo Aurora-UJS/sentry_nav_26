@@ -38,6 +38,7 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 		md_.tmp_buffer1_ = vector<double>(max_map_buffer_size, 0);
 		md_.elevation_buffer_ = vector<float>(max_map_buffer_size, std::numeric_limits<float>::quiet_NaN());
 		md_.slope_obstacle_buffer_ = vector<char>(max_map_buffer_size, 0);
+		md_.logodds_buffer_ = vector<float>(max_map_buffer_size, 0.0f);
 	}
 	else
 	{
@@ -66,6 +67,7 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 		md_.tmp_buffer1_ = vector<double>(buffer_size, 0);
 		md_.elevation_buffer_ = vector<float>(buffer_size, std::numeric_limits<float>::quiet_NaN());
 		md_.slope_obstacle_buffer_ = vector<char>(buffer_size, 0);
+		md_.logodds_buffer_ = vector<float>(buffer_size, 0.0f);
 	}
 
 	esdf_timer_ = node_->create_wall_timer(0.05s, std::bind(&SDFMap::updateESDFCallback, this));
@@ -76,6 +78,13 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	mp_.local_update_range_(0) = node_->declare_parameter<double>("sdf_map.local_update_range_x", 3.0);
 	mp_.local_update_range_(1) = node_->declare_parameter<double>("sdf_map.local_update_range_y", 3.0);
 	mp_.resolution_inv_ = 1 / mp_.resolution_;
+
+	// Log-odds 参数
+	mp_.logodds_hit_ = node_->declare_parameter<double>("sdf_map.logodds_hit", 0.85);
+	mp_.logodds_miss_ = node_->declare_parameter<double>("sdf_map.logodds_miss", -0.4);
+	mp_.logodds_max_ = node_->declare_parameter<double>("sdf_map.logodds_max", 3.5);
+	mp_.logodds_min_ = node_->declare_parameter<double>("sdf_map.logodds_min", -2.0);
+	mp_.logodds_thresh_ = node_->declare_parameter<double>("sdf_map.logodds_thresh", 0.0);
 
 	RCLCPP_INFO(node_->get_logger(),
 		"Inflation: %.3fm (inf_step=%d), local_range=(%.1f,%.1f)",
@@ -99,6 +108,7 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	md_.local_bound_max_ = Eigen::Vector2i(0, 0);
 	md_.local_bound_min_ = Eigen::Vector2i::Zero();
 	md_.local_bound_max_ = Eigen::Vector2i::Zero();
+	md_.ring_offset_ = Eigen::Vector2i::Zero();
 	md_.has_odom_ = false;
 	md_.has_cloud_ = false;
 	md_.esdf_need_update_ = false;
@@ -268,6 +278,128 @@ void SDFMap::resetBuffer(Eigen::Vector2d min_pos, Eigen::Vector2d max_pos)
 			md_.distance_buffer_[toAddress(x, y)] = 10000;
 		}
 }
+void SDFMap::clearRingSlice(int dim, int from, int to)
+{
+	// 清空 dim 维度 [from, to) 范围内所有缓冲区
+	// dim=0: 清空 x 列, dim=1: 清空 y 行
+	int N0 = mp_.map_voxel_num_(0);
+	int N1 = mp_.map_voxel_num_(1);
+	int buf_size = N0 * N1;
+
+	auto clear_addr = [&](int addr) {
+		if (addr < 0 || addr >= buf_size) return;
+		md_.occupancy_buffer_inflate_[addr] = 0;
+		md_.occupancy_buffer_neg[addr] = 0;
+		md_.distance_buffer_[addr] = 10000;
+		md_.distance_buffer_neg_[addr] = 10000;
+		md_.distance_buffer_all_[addr] = 10000;
+		md_.tmp_buffer1_[addr] = 0;
+		md_.elevation_buffer_[addr] = std::numeric_limits<float>::quiet_NaN();
+		md_.slope_obstacle_buffer_[addr] = 0;
+		md_.logodds_buffer_[addr] = 0.0f;
+	};
+
+	if (dim == 0) {
+		// 清空 x 在 [from, to) 的列 (逻辑索引)
+		for (int x = from; x < to; ++x) {
+			int lx = ((x % N0) + N0) % N0;
+			for (int y = 0; y < N1; ++y) {
+				int bx = (lx + md_.ring_offset_(0)) % N0;
+				int by = (y + md_.ring_offset_(1)) % N1;
+				if (bx < 0) bx += N0;
+				if (by < 0) by += N1;
+				clear_addr(bx * N1 + by);
+			}
+		}
+	} else {
+		// 清空 y 在 [from, to) 的行 (逻辑索引)
+		for (int y = from; y < to; ++y) {
+			int ly = ((y % N1) + N1) % N1;
+			for (int x = 0; x < N0; ++x) {
+				int bx = (x + md_.ring_offset_(0)) % N0;
+				int by = (ly + md_.ring_offset_(1)) % N1;
+				if (bx < 0) bx += N0;
+				if (by < 0) by += N1;
+				clear_addr(bx * N1 + by);
+			}
+		}
+	}
+}
+
+void SDFMap::slideMapTo(const Eigen::Vector2d &new_center)
+{
+	Eigen::Vector2d new_origin = new_center - mp_.map_size_ * 0.5;
+
+	// 计算新旧原点的格子偏移
+	Eigen::Vector2i shift;
+	for (int i = 0; i < 2; ++i)
+		shift(i) = (int)round((new_origin(i) - mp_.map_origin_(i)) * mp_.resolution_inv_);
+
+	// 阈值: 偏移小于 map_size 10% 时不滑动 (避免频繁抖动)
+	int threshold = (int)(mp_.map_voxel_num_(0) * 0.1);
+	if (abs(shift(0)) < threshold && abs(shift(1)) < threshold)
+		return;
+
+	int N0 = mp_.map_voxel_num_(0);
+	int N1 = mp_.map_voxel_num_(1);
+
+	RCLCPP_INFO(node_->get_logger(),
+		"slideMapTo: shift=(%d,%d), old_origin=(%.2f,%.2f) -> new_origin=(%.2f,%.2f)",
+		shift(0), shift(1), mp_.map_origin_(0), mp_.map_origin_(1),
+		new_origin(0), new_origin(1));
+
+	// 清空新暴露区域 (X 方向)
+	if (shift(0) > 0) {
+		// 向 +x 滑动, 清空旧数据尾部 (新的高 x 区域)
+		clearRingSlice(0, N0 - shift(0), N0);
+	} else if (shift(0) < 0) {
+		// 向 -x 滑动, 清空旧数据头部 (新的低 x 区域)
+		clearRingSlice(0, 0, -shift(0));
+	}
+
+	// 更新 X 方向的 ring_offset
+	md_.ring_offset_(0) = ((md_.ring_offset_(0) + shift(0)) % N0 + N0) % N0;
+
+	// 清空新暴露区域 (Y 方向) — 在 X offset 更新之后
+	if (shift(1) > 0) {
+		clearRingSlice(1, N1 - shift(1), N1);
+	} else if (shift(1) < 0) {
+		clearRingSlice(1, 0, -shift(1));
+	}
+
+	// 更新 Y 方向的 ring_offset
+	md_.ring_offset_(1) = ((md_.ring_offset_(1) + shift(1)) % N1 + N1) % N1;
+
+	// 更新 map_origin 和 boundary (对齐到格子)
+	for (int i = 0; i < 2; ++i)
+		mp_.map_origin_(i) += shift(i) * mp_.resolution_;
+	mp_.map_min_boundary_ = mp_.map_origin_;
+	mp_.map_max_boundary_ = mp_.map_origin_ + mp_.map_size_;
+}
+void SDFMap::raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end)
+{
+	int x0 = start(0), y0 = start(1);
+	int x1 = end(0),   y1 = end(1);
+	int dx = abs(x1 - x0), dy = abs(y1 - y0);
+	int sx = (x0 < x1) ? 1 : -1;
+	int sy = (y0 < y1) ? 1 : -1;
+	int err = dx - dy;
+
+	// 沿射线降低 logodds (free 观测, 不含终点)
+	while (x0 != x1 || y0 != y1) {
+		Eigen::Vector2i cell(x0, y0);
+		if (isInMap(cell)) {
+			int addr = toAddress(cell);
+			md_.logodds_buffer_[addr] += (float)mp_.logodds_miss_;
+			if (md_.logodds_buffer_[addr] < (float)mp_.logodds_min_)
+				md_.logodds_buffer_[addr] = (float)mp_.logodds_min_;
+		}
+
+		int e2 = 2 * err;
+		if (e2 > -dy) { err -= dy; x0 += sx; }
+		if (e2 <  dx) { err += dx; y0 += sy; }
+	}
+}
 void SDFMap::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom)
 {
 	md_.laser_pos_(0) = odom->pose.pose.position.x;
@@ -309,8 +441,25 @@ void SDFMap::laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &la
 	if (isnan(md_.laser_pos_(0)) || isnan(md_.laser_pos_(1)))
 		return;
 
-	this->resetBuffer(md_.laser_pos_ - mp_.local_update_range_,
-					  md_.laser_pos_ + mp_.local_update_range_);
+	this->slideMapTo(md_.laser_pos_);
+
+	// 光线追踪清除自由空间
+	Eigen::Vector2i sensor_idx;
+	posToIndex(md_.laser_pos_, sensor_idx);
+	for (size_t i = 0; i < latest_laser.points.size(); ++i)
+	{
+		Eigen::Vector2d p2d(latest_laser.points[i].x, latest_laser.points[i].y);
+		Eigen::Vector2d devi = p2d - md_.laser_pos_;
+		if (devi.norm() < 0.2)
+			continue;
+
+		Eigen::Vector2i hit_idx;
+		posToIndex(p2d, hit_idx);
+		if (!isInMap(hit_idx))
+			continue;
+
+		raycast(sensor_idx, hit_idx);
+	}
 
 	pcl::PointXY pt;
 	Eigen::Vector2d p2d, p2d_inf;
@@ -356,7 +505,9 @@ void SDFMap::laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &la
 
 					int idx_inf = toAddress(inf_pt);
 
-					md_.occupancy_buffer_inflate_[idx_inf] = 1;
+					md_.logodds_buffer_[idx_inf] += (float)mp_.logodds_hit_;
+					if (md_.logodds_buffer_[idx_inf] > (float)mp_.logodds_max_)
+						md_.logodds_buffer_[idx_inf] = (float)mp_.logodds_max_;
 				}
 		}
 	}
@@ -371,6 +522,9 @@ void SDFMap::laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &la
 
 	boundIndex(md_.local_bound_min_);
 	boundIndex(md_.local_bound_max_);
+
+	// logodds → binary occupancy
+	thresholdLogodds();
 
 	md_.esdf_need_update_ = true;
 	md_.update_num_ += 1;
@@ -400,10 +554,9 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 		"cloudCallback: %zu pts, robot at (%.2f, %.2f), height filter [%.2f, %.2f]",
 		cloud_3d.points.size(), md_.laser_pos_(0), md_.laser_pos_(1), min_h, max_h);
 
-	this->resetBuffer(md_.laser_pos_ - mp_.local_update_range_,
-					  md_.laser_pos_ + mp_.local_update_range_);
+	this->slideMapTo(md_.laser_pos_);
 
-	// 清空局部高程图
+	// 清空局部高程图 (每帧重建，不做累积)
 	Eigen::Vector2i local_min, local_max;
 	posToIndex(-mp_.local_update_range_ + md_.laser_pos_, local_min);
 	posToIndex(mp_.local_update_range_ + md_.laser_pos_, local_max);
@@ -412,7 +565,7 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 	int buf_size = (int)md_.elevation_buffer_.size();
 	for (int x = local_min(0); x <= local_max(0); ++x)
 		for (int y = local_min(1); y <= local_max(1); ++y) {
-			int addr = x * mp_.map_voxel_num_(1) + y;
+			int addr = toAddress(x, y);
 			if (addr >= 0 && addr < buf_size)
 				md_.elevation_buffer_[addr] = std::numeric_limits<float>::quiet_NaN();
 		}
@@ -441,6 +594,27 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 		float &elev = md_.elevation_buffer_[addr];
 		if (std::isnan(elev) || pt.z < elev)
 			elev = pt.z;  // 取最低点作为地面
+	}
+
+	// === Pass 1.5: 光线追踪清除自由空间 ===
+	Eigen::Vector2i sensor_idx;
+	posToIndex(md_.laser_pos_, sensor_idx);
+	for (const auto &pt : cloud_3d.points)
+	{
+		if (pt.z < min_h || pt.z > max_h)
+			continue;
+
+		Eigen::Vector2d p2d(pt.x, pt.y);
+		Eigen::Vector2d devi = p2d - md_.laser_pos_;
+		if (devi.norm() < 0.6)
+			continue;
+
+		Eigen::Vector2i hit_idx;
+		posToIndex(p2d, hit_idx);
+		if (!isInMap(hit_idx))
+			continue;
+
+		raycast(sensor_idx, hit_idx);
 	}
 
 	// === Pass 2: 根据坡度 + 高度判定障碍 ===
@@ -520,7 +694,10 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 					posToIndex(p2d_inf, inf_pt);
 					if (!isInMap(inf_pt))
 						continue;
-					md_.occupancy_buffer_inflate_[toAddress(inf_pt)] = 1;
+					int inf_addr = toAddress(inf_pt);
+					md_.logodds_buffer_[inf_addr] += (float)mp_.logodds_hit_;
+					if (md_.logodds_buffer_[inf_addr] > (float)mp_.logodds_max_)
+						md_.logodds_buffer_[inf_addr] = (float)mp_.logodds_max_;
 					occupied_count++;
 				}
 			}
@@ -540,6 +717,9 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 	boundIndex(md_.local_bound_min_);
 	boundIndex(md_.local_bound_max_);
 
+	// logodds → binary occupancy
+	thresholdLogodds();
+
 	RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
 		"cloudCB bounds: laser=(%.2f,%.2f) -> idx_min=(%d,%d) idx_max=(%d,%d)",
 		md_.laser_pos_(0), md_.laser_pos_(1),
@@ -548,6 +728,16 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 
 	md_.esdf_need_update_ = true;
 	md_.update_num_ += 1;
+}
+void SDFMap::thresholdLogodds()
+{
+	for (int x = md_.local_bound_min_(0); x <= md_.local_bound_max_(0); ++x)
+		for (int y = md_.local_bound_min_(1); y <= md_.local_bound_max_(1); ++y)
+		{
+			int addr = toAddress(x, y);
+			md_.occupancy_buffer_inflate_[addr] =
+				(md_.logodds_buffer_[addr] > (float)mp_.logodds_thresh_) ? 1 : 0;
+		}
 }
 void SDFMap::updateESDFCallback()
 {
@@ -850,12 +1040,20 @@ void SDFMap::indexToPos(const Eigen::Vector2i &id, Eigen::Vector2d &pos)
 
 int SDFMap::toAddress(const Eigen::Vector2i &id)
 {
-	return id(0) * mp_.map_voxel_num_(1) + id(1);
+	int bx = (id(0) + md_.ring_offset_(0)) % mp_.map_voxel_num_(0);
+	int by = (id(1) + md_.ring_offset_(1)) % mp_.map_voxel_num_(1);
+	if (bx < 0) bx += mp_.map_voxel_num_(0);
+	if (by < 0) by += mp_.map_voxel_num_(1);
+	return bx * mp_.map_voxel_num_(1) + by;
 }
 
 int SDFMap::toAddress(int &x, int &y)
 {
-	return x * mp_.map_voxel_num_(1) + y;
+	int bx = (x + md_.ring_offset_(0)) % mp_.map_voxel_num_(0);
+	int by = (y + md_.ring_offset_(1)) % mp_.map_voxel_num_(1);
+	if (bx < 0) bx += mp_.map_voxel_num_(0);
+	if (by < 0) by += mp_.map_voxel_num_(1);
+	return bx * mp_.map_voxel_num_(1) + by;
 }
 
 void SDFMap::boundIndex(Eigen::Vector2i &id)
@@ -881,6 +1079,18 @@ double SDFMap::getDistance(const Eigen::Vector2d &pos)
 	posToIndex(pos, id);
 	boundIndex(id);
 	return md_.distance_buffer_all_[toAddress(id)];
+}
+
+double SDFMap::getDistanceByIndex(const Eigen::Vector2i &idx)
+{
+	Eigen::Vector2i id = idx;
+	boundIndex(id);
+	return md_.distance_buffer_all_[toAddress(id)];
+}
+
+Eigen::Vector2d SDFMap::getMapOrigin() const
+{
+	return mp_.map_origin_;
 }
 
 bool SDFMap::isInMap(const Eigen::Vector2d &pos)
