@@ -13,7 +13,8 @@
   <depend>ros_gz_bridge</depend>
   <depend>ros_gz_sim</depend>
   <depend>teleop_twist_keyboard</depend>
-  <depend>sentry_planner</depend>
+  <depend>sentry_local_planner</depend>
+  <depend>sentry_global_planner</depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

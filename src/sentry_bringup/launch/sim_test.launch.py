@@ -109,12 +109,37 @@ def generate_launch_description():
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(
-                        get_package_share_directory("sentry_planner"),
+                        get_package_share_directory("sentry_local_planner"),
                         "launch",
                         "planner.launch.py",
                     )
                 ),
                 launch_arguments={"use_sim_time": "true"}.items(),
+            )
+        ],
+    )
+
+    # === 7. Global Planner (延迟12秒，与 local planner 同时) ===
+    map_yaml_path = os.path.join(
+        get_package_share_directory("sentry_bringup"),
+        "map",
+        "rmuc_2025.yaml",
+    )
+    global_planner_launch = TimerAction(
+        period=12.0,
+        actions=[
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    os.path.join(
+                        get_package_share_directory("sentry_global_planner"),
+                        "launch",
+                        "global_planner.launch.py",
+                    )
+                ),
+                launch_arguments={
+                    "use_sim_time": "true",
+                    "map_yaml": map_yaml_path,
+                }.items(),
             )
         ],
     )
@@ -136,5 +161,7 @@ def generate_launch_description():
             teleop_node,
             # Planner (延迟12秒)
             planner_launch,
+            # Global Planner (延迟12秒)
+            global_planner_launch,
         ]
     )

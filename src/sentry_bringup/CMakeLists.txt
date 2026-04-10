@@ -9,6 +9,7 @@ find_package(ros_gz_sim REQUIRED)
 install(DIRECTORY
   config
   launch
+  map
   scripts
   DESTINATION share/${PROJECT_NAME}
 )
