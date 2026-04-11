@@ -155,7 +155,9 @@ private:
     void planToGoal(Eigen::Vector2d goal_pt)
     {
         Eigen::Vector2d diff = goal_pt - current_pos_;
-        if (diff.norm() < 0.4) return;
+        // A* near_end tolerance = ceil(1/resolution_astar) * resolution_astar ≈ 1.0m
+        // 不要在这个范围内重规划，让最后一段轨迹自然执行完
+        if (diff.norm() < 1.0) return;
 
         double local_range = 7.5;
         this->get_parameter("sdf_map.local_update_range_x", local_range);
@@ -199,7 +201,7 @@ private:
     void replanCallback()
     {
         if (!has_odom_ || !has_final_goal_) return;
-        if ((final_goal_ - current_pos_).norm() < 0.4) return;
+        if ((final_goal_ - current_pos_).norm() < 1.0) return;
 
         Eigen::Vector2d local_goal = final_goal_;
         if (has_global_path_ && !global_waypoints_.empty())
@@ -221,7 +223,7 @@ private:
         if (has_traj_ && elapsed >= traj_duration_)
         {
             has_traj_ = false;
-            if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 0.4) {
+            if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 1.0) {
                 RCLCPP_INFO(this->get_logger(), "Goal reached!");
                 has_final_goal_ = false;
             }

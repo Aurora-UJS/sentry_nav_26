@@ -120,7 +120,7 @@ namespace fast_planner
                     estimateHeuristic(cur_node->state, end_state, time_to_goal);
                     computeShotTraj(cur_node->state, end_state, time_to_goal);
                     if (init_search)
-                        RCLCPP_ERROR(node_->get_logger(), "Shot in first search loop!");
+                        RCLCPP_DEBUG(node_->get_logger(), "Shot in first search loop (start near goal)");
                 }
             }
             if (reach_horizon)
