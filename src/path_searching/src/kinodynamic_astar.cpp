@@ -1,4 +1,6 @@
 #include <path_searching/kinodynamic_astar.hpp>
+#include <path_searching/polynomial_solver.hpp>
+using namespace std;
 namespace fast_planner
 {
     KinodynamicAstar::~KinodynamicAstar()
@@ -13,10 +15,10 @@ namespace fast_planner
         /* ---------- map params ---------- */
         this->inv_resolution_ = 1.0 / resolution_;
         inv_time_resolution_ = 1.0 / time_resolution_;
-        edt_environment_->sdf_map_->getRegion(origin_, map_size_3d_);
+        env_->getMapRegion(origin_, map_size_3d_);
 
-        cout << "origin_: " << origin_.transpose() << endl;
-        cout << "map size: " << map_size_3d_.transpose() << endl;
+        RCLCPP_INFO(node_->get_logger(), "A* init: origin=(%.2f,%.2f), map_size=(%.2f,%.2f)",
+                    origin_(0), origin_(1), map_size_3d_(0), map_size_3d_(1));
 
         /* ---------- pre-allocated node ---------- */
         path_node_pool_.resize(allocate_num_);
@@ -59,7 +61,7 @@ namespace fast_planner
                                  Eigen::Vector2d end_pt, Eigen::Vector2d end_v, bool init, bool dynamic, double time_start)
     {
         // 刷新地图原点 (滑动窗口可能已移动)
-        edt_environment_->sdf_map_->getRegion(origin_, map_size_3d_);
+        env_->getMapRegion(origin_, map_size_3d_);
 
         start_vel_ = start_v;
         start_acc_ = start_a;
@@ -125,12 +127,10 @@ namespace fast_planner
             {
                 if (is_shot_succ_)
                 {
-                    std::cout << "reach end" << std::endl;
                     return REACH_END;
                 }
                 else
                 {
-                    std::cout << "reach horizon" << std::endl;
                     return REACH_HORIZON;
                 }
             }
@@ -142,12 +142,10 @@ namespace fast_planner
                 }
                 else if (cur_node->parent != NULL)
                 {
-                    std::cout << "near end" << std::endl;
                     return NEAR_END;
                 }
                 else
                 {
-                    std::cout << "no path" << std::endl;
                     return NO_PATH;
                 }
             }
@@ -211,7 +209,7 @@ namespace fast_planner
                     if (pro_node != NULL && pro_node->node_state == IN_CLOSE_SET)
                     {
                         if (init_search)
-                            std::cout << "close" << std::endl;
+                            // init_search debug: close set
                         continue;
                     }
 
@@ -220,7 +218,7 @@ namespace fast_planner
                     if (fabs(pro_v(0)) > max_vel_ || fabs(pro_v(1)) > max_vel_)
                     {
                         if (init_search)
-                            std::cout << "vel" << std::endl;
+                            // init_search debug: vel limit
                         continue;
                     }
 
@@ -230,7 +228,7 @@ namespace fast_planner
                     if (diff.norm() == 0 && ((!dynamic) || diff_time == 0))
                     {
                         if (init_search)
-                            std::cout << "same" << std::endl;
+                            // init_search debug: same voxel
                         continue;
                     }
 
@@ -247,8 +245,8 @@ namespace fast_planner
                         for (const auto &offset : footprint_offsets_)
                         {
                             Eigen::Vector2d fp = pos + offset;
-                            if (edt_environment_->sdf_map_->getInflateOccupancy(fp) == 1 ||
-                                !edt_environment_->sdf_map_->isInMap(fp))
+                            if (env_->getInflateOccupancy(fp) == 1 ||
+                                !env_->isInMap(fp))
                             {
                                 fp_occ = true;
                                 break;
@@ -263,7 +261,7 @@ namespace fast_planner
                     if (is_occ)
                     {
                         if (init_search)
-                            std::cout << "safe" << std::endl;
+                            // init_search debug: collision
                         continue;
                     }
 
@@ -324,7 +322,7 @@ namespace fast_planner
                             use_node_num_ += 1;
                             if (use_node_num_ == allocate_num_)
                             {
-                                cout << "run out of memory." << endl;
+                                RCLCPP_WARN(node_->get_logger(), "A* run out of memory");
                                 return NO_PATH;
                             }
                         }
@@ -345,15 +343,14 @@ namespace fast_planner
                         }
                         else
                         {
-                            cout << "error type in searching: " << pro_node->node_state << endl;
+                            RCLCPP_ERROR(node_->get_logger(), "Error type in A* searching: %c", pro_node->node_state);
                         }
                     }
                 }
             // init_search = false;
         }
-        cout << "open set empty, no path!" << endl;
-        cout << "use node num: " << use_node_num_ << endl;
-        cout << "iter num: " << iter_num_ << endl;
+        RCLCPP_WARN(node_->get_logger(), "A* open set empty, no path! nodes=%d, iters=%d",
+                    use_node_num_, iter_num_);
         return NO_PATH;
     }
 
@@ -369,7 +366,7 @@ namespace fast_planner
         double c4 = 0;
         double c5 = w_time_;
 
-        std::vector<double> ts = quartic(c5, c4, c3, c2, c1);
+        std::vector<double> ts = solveQuartic(c5, c4, c3, c2, c1);
 
         double v_max = max_vel_ * 0.5;
         double t_bar = (x1.head(2) - x2.head(2)).lpNorm<Eigen::Infinity>() / v_max;
@@ -454,8 +451,8 @@ namespace fast_planner
             for (const auto &offset : footprint_offsets_)
             {
                 Eigen::Vector2d fp = coord + offset;
-                if (edt_environment_->sdf_map_->getInflateOccupancy(fp) == 1 ||
-                    !edt_environment_->sdf_map_->isInMap(fp))
+                if (env_->getInflateOccupancy(fp) == 1 ||
+                    !env_->isInMap(fp))
                     return false;
             }
         }
@@ -488,81 +485,6 @@ namespace fast_planner
         int idx = floor((time - time_origin_) * inv_time_resolution_);
         return idx;
     }
-    vector<double> KinodynamicAstar::cubic(double a, double b, double c, double d)
-    {
-        vector<double> dts;
-
-        double a2 = b / a;
-        double a1 = c / a;
-        double a0 = d / a;
-
-        double Q = (3 * a1 - a2 * a2) / 9;
-        double R = (9 * a1 * a2 - 27 * a0 - 2 * a2 * a2 * a2) / 54;
-        double D = Q * Q * Q + R * R;
-        if (D > 0)
-        {
-            double S = std::cbrt(R + sqrt(D));
-            double T = std::cbrt(R - sqrt(D));
-            dts.push_back(-a2 / 3 + (S + T));
-            return dts;
-        }
-        else if (D == 0)
-        {
-            double S = std::cbrt(R);
-            dts.push_back(-a2 / 3 + S + S);
-            dts.push_back(-a2 / 3 - S);
-            return dts;
-        }
-        else
-        {
-            double theta = acos(R / sqrt(-Q * Q * Q));
-            dts.push_back(2 * sqrt(-Q) * cos(theta / 3) - a2 / 3);
-            dts.push_back(2 * sqrt(-Q) * cos((theta + 2 * M_PI) / 3) - a2 / 3);
-            dts.push_back(2 * sqrt(-Q) * cos((theta + 4 * M_PI) / 3) - a2 / 3);
-            return dts;
-        }
-    }
-    vector<double> KinodynamicAstar::quartic(double a, double b, double c, double d, double e)
-    {
-        vector<double> dts;
-
-        double a3 = b / a;
-        double a2 = c / a;
-        double a1 = d / a;
-        double a0 = e / a;
-
-        vector<double> ys = cubic(1, -a2, a1 * a3 - 4 * a0, 4 * a2 * a0 - a1 * a1 - a3 * a3 * a0);
-        double y1 = ys.front();
-        double r = a3 * a3 / 4 - a2 + y1;
-        if (r < 0)
-            return dts;
-
-        double R = sqrt(r);
-        double D, E;
-        if (R != 0)
-        {
-            D = sqrt(0.75 * a3 * a3 - R * R - 2 * a2 + 0.25 * (4 * a3 * a2 - 8 * a1 - a3 * a3 * a3) / R);
-            E = sqrt(0.75 * a3 * a3 - R * R - 2 * a2 - 0.25 * (4 * a3 * a2 - 8 * a1 - a3 * a3 * a3) / R);
-        }
-        else
-        {
-            D = sqrt(0.75 * a3 * a3 - 2 * a2 + 2 * sqrt(y1 * y1 - 4 * a0));
-            E = sqrt(0.75 * a3 * a3 - 2 * a2 - 2 * sqrt(y1 * y1 - 4 * a0));
-        }
-
-        if (!std::isnan(D))
-        {
-            dts.push_back(-a3 / 4 + R / 2 + D / 2);
-            dts.push_back(-a3 / 4 + R / 2 - D / 2);
-        }
-        if (!std::isnan(E))
-        {
-            dts.push_back(-a3 / 4 - R / 2 + E / 2);
-            dts.push_back(-a3 / 4 - R / 2 - E / 2);
-        }
-
-        return dts;
-    }
     Eigen::Vector2i KinodynamicAstar::posToIndex(Eigen::Vector2d pt)
     {
         Eigen::Vector2i idx = ((pt - origin_) * inv_resolution_).array().floor().cast<int>();
@@ -585,9 +507,9 @@ namespace fast_planner
 
         state1 = phi_ * state0 + integral;
     }
-    void KinodynamicAstar::setEnvironment(const EDTEnvironment::Ptr &env)
+    void KinodynamicAstar::setEnvironment(sentry_nav::EnvironmentInterface *env)
     {
-        this->edt_environment_ = env;
+        this->env_ = env;
     }
     void KinodynamicAstar::reset()
     {
@@ -613,7 +535,7 @@ namespace fast_planner
     std::vector<Eigen::Vector2d> KinodynamicAstar::getKinoTraj(double delta_t)
     {
         vector<Eigen::Vector2d> state_list;
-        std::cout << "path_nodes_" << path_nodes_.size() << std::endl;
+        RCLCPP_DEBUG(node_->get_logger(), "getKinoTraj: path_nodes=%zu", path_nodes_.size());
         /* ---------- get traj of searching ---------- */
         PathNodePtr node = path_nodes_.back();
         Eigen::Matrix<double, 4, 1> x0, xt;

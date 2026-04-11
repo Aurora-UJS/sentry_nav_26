@@ -10,7 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include "plan_env/edt_environment.hpp"
+#include "plan_env/environment_interface.hpp"
 namespace fast_planner
 {
 #define IN_CLOSE_SET 'a'
@@ -113,7 +113,7 @@ namespace fast_planner
         ~KinodynamicAstar();
         void init();
         void setParam(std::shared_ptr<rclcpp::Node> nh);
-        void setEnvironment(const EDTEnvironment::Ptr &env);
+        void setEnvironment(sentry_nav::EnvironmentInterface *env);
         void reset();
         std::vector<Eigen::Vector2d> getKinoTraj(double delta_t);
         std::vector<PathNodePtr> getVisitedNodes();
@@ -121,8 +121,8 @@ namespace fast_planner
         int search(Eigen::Vector2d start_pt, Eigen::Vector2d start_vel,
                    Eigen::Vector2d start_acc, Eigen::Vector2d end_pt,
                    Eigen::Vector2d end_vel, bool init, bool dynamic = false, double time_start = -1.0);
-        void getSamples(double &ts, vector<Eigen::Vector2d> &point_set,
-                        vector<Eigen::Vector2d> &start_end_derivatives);
+        void getSamples(double &ts, std::vector<Eigen::Vector2d> &point_set,
+                        std::vector<Eigen::Vector2d> &start_end_derivatives);
         enum
         {
             REACH_HORIZON = 1,
@@ -134,12 +134,12 @@ namespace fast_planner
     private:
         std::shared_ptr<rclcpp::Node> node_;
         
-        vector<PathNodePtr> path_node_pool_;
+        std::vector<PathNodePtr> path_node_pool_;
         std::vector<PathNodePtr> path_nodes_;
         int use_node_num_, iter_num_;
 
         NodeHashTable expanded_nodes_;
-        EDTEnvironment::Ptr edt_environment_;
+        sentry_nav::EnvironmentInterface *env_;
         Eigen::Matrix<double, 4, 4> phi_; // state transit matrix
 
         std::priority_queue<PathNodePtr, std::vector<PathNodePtr>, NodeComparator> open_set_;
@@ -162,8 +162,6 @@ namespace fast_planner
         bool is_shot_succ_ = false;
 
         double estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x2, double &optimal_time);
-        vector<double> quartic(double a, double b, double c, double d, double e);
-        vector<double> cubic(double a, double b, double c, double d);
 
         bool computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd state2, double time_to_goal);
         Eigen::Vector2i posToIndex(Eigen::Vector2d pt);
