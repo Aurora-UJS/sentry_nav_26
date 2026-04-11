@@ -12,19 +12,21 @@ find_package(visualization_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(plan_env REQUIRED)
 find_package(path_searching REQUIRED)
-find_package(bspline REQUIRED)
-find_package(bspline_opt REQUIRED)
 find_package(NLopt REQUIRED)
 find_package(Eigen3 REQUIRED)
 
-add_executable(sentry_local_planner_node src/sentry_local_planner_node.cpp)
+add_executable(sentry_local_planner_node
+  src/sentry_local_planner_node.cpp
+  src/trajectory_tracker.cpp
+  src/minco_trajectory.cpp
+)
 target_include_directories(sentry_local_planner_node PRIVATE
   ${EIGEN3_INCLUDE_DIRS} ${NLOPT_INCLUDE_DIRS}
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 ament_target_dependencies(sentry_local_planner_node
   rclcpp nav_msgs geometry_msgs sensor_msgs visualization_msgs tf2_ros
-  plan_env path_searching bspline bspline_opt
+  plan_env path_searching
 )
 target_link_libraries(sentry_local_planner_node ${NLOPT_LIBRARIES})
 

@@ -2,7 +2,7 @@
 <package format="3">
   <name>sentry_local_planner</name>
   <version>0.0.1</version>
-  <description>Sentry local planner: KinodynamicAstar + MINCO/BSpline + MPC/PD</description>
+  <description>Sentry local planner: KinodynamicAstar + MINCO + MPC</description>
   <maintainer email="neomelt@example.com">Neomelt</maintainer>
   <license>BSD-3-Clause</license>
 
@@ -16,8 +16,6 @@
   <depend>tf2_ros</depend>
   <depend>plan_env</depend>
   <depend>path_searching</depend>
-  <depend>bspline</depend>
-  <depend>bspline_opt</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
