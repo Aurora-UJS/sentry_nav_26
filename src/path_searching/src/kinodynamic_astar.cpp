@@ -208,8 +208,6 @@ namespace fast_planner
                     PathNodePtr pro_node = dynamic ? expanded_nodes_.find(pro_id, pro_t_id) : expanded_nodes_.find(pro_id);
                     if (pro_node != NULL && pro_node->node_state == IN_CLOSE_SET)
                     {
-                        if (init_search)
-                            // init_search debug: close set
                         continue;
                     }
 
@@ -217,8 +215,6 @@ namespace fast_planner
                     Eigen::Vector2d pro_v = pro_state.tail(2);
                     if (fabs(pro_v(0)) > max_vel_ || fabs(pro_v(1)) > max_vel_)
                     {
-                        if (init_search)
-                            // init_search debug: vel limit
                         continue;
                     }
 
@@ -227,8 +223,6 @@ namespace fast_planner
                     int diff_time = pro_t_id - cur_node->time_idx;
                     if (diff.norm() == 0 && ((!dynamic) || diff_time == 0))
                     {
-                        if (init_search)
-                            // init_search debug: same voxel
                         continue;
                     }
 
@@ -260,8 +254,6 @@ namespace fast_planner
                     }
                     if (is_occ)
                     {
-                        if (init_search)
-                            // init_search debug: collision
                         continue;
                     }
 
