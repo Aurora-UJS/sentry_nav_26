@@ -7,10 +7,11 @@
 #include <utility>
 #include "plan_env/sdf_map.hpp"
 #include "plan_env/obj_predictor.hpp"
+#include "plan_env/environment_interface.hpp"
 
 namespace fast_planner
 {
-    class EDTEnvironment
+    class EDTEnvironment : public sentry_nav::EnvironmentInterface
     {
     private:
         ObjPrediction obj_prediction_;
@@ -23,7 +24,7 @@ namespace fast_planner
         EDTEnvironment(/* args */)
         {
         }
-        ~EDTEnvironment()
+        ~EDTEnvironment() override
         {
         }
         SDFMap::Ptr sdf_map_;
@@ -35,19 +36,40 @@ namespace fast_planner
         void interpolateBilinear(double values[2][2], const Eigen::Vector2d &diff,
                                  double &value, Eigen::Vector2d &grad);
         void evaluateEDTWithGrad(const Eigen::Vector2d &pos, double time,
-                                 double &dist, Eigen::Vector2d &grad);
+                                 double &dist, Eigen::Vector2d &grad) override;
         double getDistanceAtIndex(const Eigen::Vector2i &idx);
         void evaluateEDTBiquadratic(const Eigen::Vector2d &pos, double &dist,
                                     Eigen::Vector2d &grad);
         double evaluateCoarseEDT(Eigen::Vector2d &pos, double time);
-        bool hasDynamicObjects() const
+        bool hasDynamicObjects() const override
         {
             return obj_prediction_ != nullptr && !obj_prediction_->empty();
         }
-        void getMapRegion(Eigen::Vector2d &ori, Eigen::Vector2d &size)
+        void getMapRegion(Eigen::Vector2d &ori, Eigen::Vector2d &size) override
         {
             sdf_map_->getRegion(ori, size);
         }
+
+        // EnvironmentInterface overrides (delegate to sdf_map_)
+        double getDistance(const Eigen::Vector2d &pos) override
+        {
+            return sdf_map_->getDistance(pos);
+        }
+        int getInflateOccupancy(const Eigen::Vector2d &pos) override
+        {
+            return sdf_map_->getInflateOccupancy(const_cast<Eigen::Vector2d&>(pos));
+        }
+        bool isInMap(const Eigen::Vector2d &pos) override
+        {
+            return sdf_map_->isInMap(pos);
+        }
+        double getResolution() override
+        {
+            return sdf_map_->getResolution();
+        }
+        // evaluateCoarseEDT override with const ref
+        double evaluateCoarseEDT(const Eigen::Vector2d &pos, double time) override;
+
         typedef shared_ptr<EDTEnvironment> Ptr;
     };
 }

@@ -2,18 +2,11 @@
 #define _SDF_MAP_HPP_
 
 #include <rclcpp/rclcpp.hpp>
-#include <random>
-#include <tuple>
-#include <queue>
-
-#include <Eigen/Eigen>
-#include <Eigen/StdVector>
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <visualization_msgs/msg/marker.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -32,83 +25,10 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/core.hpp>
 
+#include <plan_env/map_core.hpp>
+#include <plan_env/sensor_processor.hpp>
+
 using namespace std;
-
-struct Global_Map
-{
-  std::string path;
-  Eigen::Vector2d map_origin_, map_size_;
-  Eigen::Vector2d image_size;
-  double resolution_, resolution_inv_;
-  std::vector<char> occupancy_buffer_inflate_Global_Map;
-  Eigen::Vector2i map_voxel_num_; // map range in index
-
-};
-
-
-
-struct MappingParameters
-{
-  Eigen::Vector2d map_origin_, map_size_;
-  Eigen::Vector2d image_size;
-  Eigen::Vector2d map_min_boundary_, map_max_boundary_; // map range in pos
-  Eigen::Vector2d local_update_range_;
-  int local_map_margin_;
-
-  Eigen::Vector2i map_voxel_num_; // map range in index
-
-  double resolution_, resolution_inv_;
-  double obstacles_inflation_;
-  double max_slope_rad_;    // 最大可通行坡度 (rad)
-  double step_height_max_;  // 最大可通行台阶高度 (m)
-  bool show_esdf_time_, show_occ_time_;
-
-  // Log-odds 贝叶斯占据更新参数
-  double logodds_hit_, logodds_miss_;
-  double logodds_max_, logodds_min_;
-  double logodds_thresh_;
-
-  string frame_id_;
-};
-
-struct MappingData
-{
-  Eigen::Vector2d laser_pos_, last_laser_pos_;
-  Eigen::Quaterniond laser_q_, last_laser_q_;
-  double laser_z_ = 0.0;  // 机器人当前 Z 高度 (odom 系)
-
-  bool has_odom_, has_cloud_;
-  std::vector<char> occupancy_buffer_inflate_;
-  std::vector<Global_Map> Global_Maps;
-  std::vector<char> occupancy_buffer_neg;
-  std::vector<double> distance_buffer_neg_;
-  std::vector<double> distance_buffer_all_;
-
-  std::vector<double> distance_buffer_;
-
-  // 高程图: 每个 2D 格子的地面高度
-  std::vector<float> elevation_buffer_;
-  // 坡度判定结果: 0=可通行, 1=障碍 (陡坡/台阶/墙壁)
-  std::vector<char> slope_obstacle_buffer_;
-
-  // Log-odds 累积值，0 = 未知
-  std::vector<float> logodds_buffer_;
-
-  std::vector<double> tmp_buffer1_;
-  Eigen::Vector2i local_bound_min_, local_bound_max_;
-  Eigen::Vector2i ring_offset_;  // 环形缓冲区偏移 (格子数)
-  bool local_updated_, esdf_need_update_;
-  double fuse_time_, esdf_time_, max_fuse_time_, max_esdf_time_;
-  int update_num_;
-  bool use_global_map = false;
-  int global_map_num = 0;
-  int current_global_map = 0;
-  inline int is_occupancy(int idx)
-  {
-    return occupancy_buffer_inflate_[idx] || (use_global_map ? Global_Maps[current_global_map].occupancy_buffer_inflate_Global_Map[idx] : 0);
-  }
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-};
 
 class SDFMap
 {
@@ -116,88 +36,70 @@ public:
   SDFMap() {};
   ~SDFMap() {};
 
-  enum
-  {
-    POSE_STAMPED = 1,
-    ODOMETRY = 2,
-    INVALID_IDX = -10000
-  };
   typedef std::shared_ptr<SDFMap> Ptr;
-  void getRegion(Eigen::Vector2d &ori, Eigen::Vector2d &size);
-  double getResolution();
-  Global_Map load_map(std::string &path, const std::string &frame,int& map_buffer_size, MappingParameters &mp);
-  void getSurroundPts(const Eigen::Vector2d &pos, Eigen::Vector2d pts[2][2], Eigen::Vector2d &diff);
+
   void initMap(std::shared_ptr<rclcpp::Node> nh);
 
-  void posToIndex(const Eigen::Vector2d &pos, Eigen::Vector2i &id);
-  void indexToPos(const Eigen::Vector2i &id, Eigen::Vector2d &pos);
-  bool isInMap(const Eigen::Vector2d &pos);
+  // ==================== 委托到 MapCore ====================
+  void posToIndex(const Eigen::Vector2d &pos, Eigen::Vector2i &id) { core_.posToIndex(pos, id); }
+  void indexToPos(const Eigen::Vector2i &id, Eigen::Vector2d &pos) { core_.indexToPos(id, pos); }
+  bool isInMap(const Eigen::Vector2d &pos) { return core_.isInMap(pos); }
+  bool isInMap(const Eigen::Vector2i &idx) { return core_.isInMap(idx); }
+  void boundIndex(Eigen::Vector2i &id) { core_.boundIndex(id); }
+  int toAddress(const Eigen::Vector2i &id) { return core_.toAddress(id); }
+  int toAddress(int &x, int &y) { return core_.toAddress(x, y); }
+  double getDistance(const Eigen::Vector2d &pos) { return core_.getDistance(pos); }
+  double getDistanceByIndex(const Eigen::Vector2i &idx) { return core_.getDistanceByIndex(idx); }
+  int getInflateOccupancy(Eigen::Vector2d pos) { return core_.getInflateOccupancy(pos); }
+  double getResolution() { return core_.getResolution(); }
+  void getRegion(Eigen::Vector2d &ori, Eigen::Vector2d &size) { core_.getRegion(ori, size); }
+  Eigen::Vector2d getMapOrigin() const { return core_.getMapOrigin(); }
+  void getSurroundPts(const Eigen::Vector2d &pos, Eigen::Vector2d pts[2][2], Eigen::Vector2d &diff)
+  { core_.getSurroundPts(pos, pts, diff); }
+  void setLocalMap(int num) { core_.setLocalMap(num); }
 
-  void boundIndex(Eigen::Vector2i &id);
-  bool isInMap(const Eigen::Vector2i &idx);
-  int toAddress(const Eigen::Vector2i &id);
-  inline void setLocalMap(const int num)
-  {
-    if (num > md_.global_map_num || num < 0)
-      return;
-    md_.current_global_map = num;
-  };
-  int toAddress(int &x, int &y);
+  // 直接暴露 core 供 edt_environment 使用
+  MapCore& getCore() { return core_; }
 
-  double getDistance(const Eigen::Vector2d &pos);
-  double getDistanceByIndex(const Eigen::Vector2i &idx);
-  Eigen::Vector2d getMapOrigin() const;
-  int getInflateOccupancy(Eigen::Vector2d pos);
+  Global_Map load_map(std::string &path, const std::string &frame, int &map_buffer_size, MappingParameters &mp);
 
 private:
-  // Subscriber with tf2 message_filter
+  MapCore core_;
+  SensorProcessor sensor_proc_;
+
+  std::shared_ptr<rclcpp::Node> node_;
+
+  // ROS subscribers/publishers/timers
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  bool use_cloud_input_ = false;
+
   std::string target_frame_;
   std::shared_ptr<tf2_ros::Buffer> tf2_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf2_listener_;
   std::shared_ptr<tf2_ros::MessageFilter<sensor_msgs::msg::LaserScan>> tf2_filter_;
   message_filters::Subscriber<sensor_msgs::msg::LaserScan> laser_sub_;
-
-  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_publisher_;
-  std::vector<std::shared_ptr<nav_msgs::msg::OccupancyGrid>> map_msgs;
-
-  std::shared_ptr<rclcpp::Node> node_;
-  MappingData md_;
-  MappingParameters mp_;
-  template <typename F_get_val, typename F_set_val>
-  void fillESDF(F_get_val f_get_val, F_set_val f_set_val, int start, int end, int dim);
   laser_geometry::LaserProjection projectoir_;
-  // shared_ptr<message_filters::Subscriber<sensor_msgs::msg::LaserScan>> laser_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
-  bool use_cloud_input_ = false;  // true = PointCloud2, false = LaserScan
 
   rclcpp::TimerBase::SharedPtr esdf_timer_, vis_timer_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_, esdf_pub_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_publisher_;
+  std::vector<std::shared_ptr<nav_msgs::msg::OccupancyGrid>> map_msgs;
+
+  // 高度过滤参数 (ROS 参数读取后缓存)
+  double cloud_min_height_ = -0.1, cloud_max_height_ = 1.0;
+
+  // ROS 回调
   void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom);
   void laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &laser_msg);
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg);
 
+  void updateESDFCallback();
+  void visCallback();
   void publishMap();
   void publishESDF();
+  void publish_map();
 
-  void visCallback();
-
-  void updateESDFCallback();
-  void updateESDF2d();
-
-  void slideMapTo(const Eigen::Vector2d &new_center);
-  void clearRingSlice(int dim, int from, int to);
-  void resetBuffer(Eigen::Vector2d min_pos, Eigen::Vector2d max_pos);
-  void raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end);
-  void thresholdLogodds();
-  void publish_map()
-  {
-    // 发布消息
-    if(!md_.use_global_map || md_.current_global_map > md_.global_map_num || md_.current_global_map <0)
-      return;
-    map_publisher_->publish(*(map_msgs[md_.current_global_map]));
-    // RCLCPP_INFO(node_->get_logger(), "Map published.");
-  }
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 #endif

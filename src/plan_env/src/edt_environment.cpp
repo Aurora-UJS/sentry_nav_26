@@ -41,13 +41,9 @@ namespace fast_planner
 
     double EDTEnvironment::minDistToAllBox(const Eigen::Vector2d &pos, const double &time)
     {
-        std::cout << "asd" << std::endl;
-
         double dist = std::numeric_limits<double>::max();
         for (int i = 0; i < obj_prediction_->size(); i++)
         {
-        std::cout << "asd" << std::endl;
-
             double di = distToBox(i, pos, time);
             if (di < dist)
                 dist = di;
@@ -150,6 +146,12 @@ namespace fast_planner
             double d2 = minDistToAllBox(pos, time);
             return min(d1, d2);
         }
+    }
+
+    double EDTEnvironment::evaluateCoarseEDT(const Eigen::Vector2d &pos, double time)
+    {
+        Eigen::Vector2d pos_copy = pos;
+        return evaluateCoarseEDT(pos_copy, time);
     }
 
     // EDTEnvironment::
