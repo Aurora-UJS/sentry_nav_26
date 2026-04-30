@@ -1,324 +1,336 @@
 # Sentry Nav 26
 
-A modular navigation system built with ROS 2 Jazzy and Nav2 for autonomous robot navigation.
+面向 RoboMaster 哨兵机器人的模块化自主导航栈，基于 **ROS 2 Jazzy** + **Gazebo Harmonic**，提供从 LIO 定位、在线建图、全局规划到局部轨迹生成与跟踪的完整闭环。
 
-Overview
+---
 
-This workspace contains packages for simulation, localization, mapping, navigation, and system integration, designed for modular development and testing with Gazebo Harmonic and Nav2.
+## 特性
 
-## 需求分析
+- **LIO 定位**：基于 [Small Point-LIO](https://github.com/Aurora-UJS/small_point_lio)，输出高频 `/Odometry` 与配准点云 `/cloud_registered`
+- **在线 2D 建图**：log-odds 占用栅格 + 高程图 + Felzenszwalb 两遍 ESDF（`plan_env`）
+- **全局规划**：JPS（Jump Point Search）+ 静态先验 PGM 地图（`sentry_global_planner`）
+- **局部规划**：Kinodynamic A* + 多项式 Shot 直达（`path_searching`）
+- **轨迹优化**：MINCO 五次多项式 + L-BFGS（NLopt），平滑/避障/可行性多目标
+- **轨迹跟踪**：50 Hz LDLT-MPC（10 步预测 horizon），独立 yaw 控制器（窄道对齐 / 开阔旋转）
+- **仿真环境**：RMUC 2025 赛场（[`rm_sim_26`](https://github.com/Neomelt/rm_sim_26)）+ Livox 雷达 / IMU 桥接
+- **中间件**：推荐 `rmw_zenoh_cpp`，大点云吞吐与多机场景表现优于 DDS
 
-|场景|需求|
-|--|--|
-|15°斜坡|坡度计算、可通行性判断|
-狗洞 550×200mm|悬空障碍检测、通道高度检查
-起伏路段 2m×70cm|地形连续性分析
-时间衰减体素|	STVL|	处理移动障碍物（其他机器人、人）
-视锥清除	|STVL	|加速清除应该空但没观测到的区域
-高程图	|新增|	坡度+起伏分析
-净空检测|	新增|	狗洞通过判断
-膨胀图	|ROG-Map	|安全距离
-ESDF	|ROG-Map|	轨迹优化梯度 (可简化为2.5D)
-|
-## 项目架构图
-``` zsh
-┌──────────────────────────────────────────────────────────────────┐
-│                        传感器输入                                 │
-│         激光雷达 (Livox等) + IMU + 轮式编码器 (可选)              │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│               Small Point-LIO (定位+稀疏地图)                     │
-│  输出:                                                           │
-│    • nav_msgs/Odometry        ← 位姿 (高频)                      │
-│    • sensor_msgs/PointCloud2  ← 配准后点云 (用于感知)             │
-│    • 内部 ikd-tree            ← SLAM用的稀疏地图                  │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │
-         ┌──────────────────┴──────────────────┐
-         ▼                                     ▼
-┌─────────────────────────┐      ┌─────────────────────────────────┐
-│  时间衰减体素栅格        │      │         高程图                   │
-│  (用于规划的稠密地图)    │      │   (坡度/狗洞/起伏分析)           │
-│                         │      │                                 │
-│  • 接收 cloud_registered │      │  • 接收 cloud_registered        │
-│  • 动态障碍物衰减        │      │  • 提取地面高度                  │
-│  • 输出 3D占用栅格       │      │  • 计算可通行性                  │
-└───────────┬─────────────┘      └───────────────┬─────────────────┘
-            │                                    │
-            └──────────────┬─────────────────────┘
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    可通行性地图 (Traversability)                  │
-│  融合: 障碍物占用 + 坡度 + 净空高度 + 起伏度                       │
-└───────────────────────────┬──────────────────────────────────────┘
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    膨胀图 + 简化ESDF                              │
-└───────────────────────────┬──────────────────────────────────────┘
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                         规划层                                    │
-│            A* (可通行性代价) → 轨迹优化                           │
-└──────────────────────────────────────────────────────────────────┘
+---
+
+## 仓库结构
+
+```
+sentry_nav_26/
+├── src/
+│   ├── sentry_bringup/          # 顶层 launch + RViz 配置 + 静态地图 (rmuc_2025)
+│   ├── sentry_sim/              # ros_gz_bridge 桥接配置
+│   ├── rm_sim_26/               # [submodule] RMUC 2025 Gazebo 仿真世界
+│   ├── small_point_lio/         # [submodule] LiDAR-Inertial Odometry
+│   ├── sensor_driver/
+│   │   └── livox_ros_driver2/   # [submodule, 真车需] Livox 驱动
+│   │
+│   ├── plan_env/                # 在线感知层：占用 + 高程 + ESDF
+│   │   ├── map_core.cpp/.hpp        # 环形缓冲、滑动窗口、ESDF 计算
+│   │   ├── sensor_processor.cpp     # 点云/激光 → occupancy + elevation
+│   │   ├── sdf_map.cpp              # ROS 接口节点 (订阅/参数/发布)
+│   │   ├── edt_environment.cpp      # 给规划器用的距离场查询接口
+│   │   └── obj_predictor.cpp        # 动态物体预测占位
+│   │
+│   ├── path_searching/          # Kinodynamic A* + 多项式求解器
+│   │   ├── kinodynamic_astar.cpp    # 二阶动力学 A* + OBVP shot
+│   │   └── polynomial_solver.hpp    # 三/四次方程解析求根
+│   │
+│   ├── sentry_global_planner/   # JPS 全局路径搜索
+│   │   ├── global_planner_node.cpp
+│   │   ├── jps_searcher.hpp         # JPS 算法实现
+│   │   └── global_map.hpp           # PGM 加载 + 静态 ESDF + OnlineMapProxy
+│   │
+│   ├── sentry_local_planner/    # MINCO + MPC 局部规划与控制
+│   │   ├── sentry_local_planner_node.cpp   # 顶层节点（10Hz replan + 50Hz control）
+│   │   ├── minco_trajectory.cpp            # MINCO 轨迹生成 + L-BFGS 优化
+│   │   ├── trajectory_tracker.cpp          # MPC ↔ 轨迹接口
+│   │   └── mpc_controller.hpp              # LDLT 求解的二阶 MPC
+│   │
+│   └── sentry_msgs/             # 自定义 msg/srv/action 模板
+│
+├── test/                        # launch 集成测试占位
+├── debug_planner.sh             # GDB 调试脚本
+├── cyclonedds.xml               # 备用 CycloneDDS 配置（默认推荐 Zenoh）
+└── README.md
 ```
 
-## 核心数据结构
-``` c++
-// 高程图 - 每个2D格子存储地面高度信息
-struct ElevationCell {
-    float height;           // 地面高度 (m)
-    float variance;         // 高度不确定性
-    float slope;            // 局部坡度 (rad)
-    float roughness;        // 粗糙度
-    uint8_t confidence;     // 观测置信度
-};
+---
 
-// 简化3D占用图 - 只保留机器人相关的高度层
-// 例如: 地面层、机器人高度层、头顶层
-struct MultiLayerOccupancy {
-    bool ground_layer;      // 0-10cm，检测地面障碍
-    bool body_layer;        // 10-35cm，机器人本体高度
-    bool head_layer;        // 35-50cm，检测悬空障碍(狗洞顶)
-    float clearance;        // 头顶净空高度
-};
+## 系统数据流
 
-// 可通行性
-struct TraversabilityCell {
-    float cost;             // 综合代价 [0, 1], 1=不可通行
-    bool passable;          // 是否可通行
-    uint8_t terrain_type;   // 地形类型: 平地/斜坡/起伏/狗洞
-};
+```
+LiDAR + IMU
+   │
+   ▼
+small_point_lio  ──►  /Odometry (高频位姿)
+                  └►  /cloud_registered (世界系点云)
+   │
+   ├──► plan_env::SDFMap
+   │       ├─ 点云 / 激光 → log-odds occupancy
+   │       ├─ 滑窗 ESDF (Felzenszwalb 两遍可分离 EDT)
+   │       └─ 高程图 + 邻域坡度
+   │
+   ├──► sentry_global_planner (JPS, 静态先验地图)
+   │       └─ /global_path  (nav_msgs/Path)
+   │
+   └──► sentry_local_planner
+           ├─ 订阅 /Odometry, /goal_pose, /global_path
+           ├─ KinodynamicAstar 在 EDTEnvironment 上搜索 (10Hz)
+           ├─ MINCO 五次轨迹 + L-BFGS 优化 (粗 8ms / 精 12ms)
+           └─ MPC 跟踪 (50Hz) ──►  /cmd_vel
 ```
 
-``` cpp
-class SentryNavigation {
-public:
-    void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        // 从 Small Point-LIO 获取位姿
-        current_pose_ = poseFromMsg(msg);
-    }
-    
-    void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
-        // 从 Small Point-LIO 获取配准后的点云
-        PointCloud cloud;
-        pcl::fromROSMsg(*msg, cloud);
-        
-        // 更新感知地图 (全部在线!)
-        temporal_voxel_grid_.update(cloud, current_pose_, current_time_);
-        elevation_map_.update(cloud, current_pose_);
-        
-        // 分析可通行性
-        traversability_.analyze(
-            temporal_voxel_grid_,
-            elevation_map_
-        );
-        
-        // 更新规划用的地图
-        inflation_map_.update(traversability_.getGrid());
-    }
-    
-private:
-    // Small Point-LIO 输出
-    Pose current_pose_;
-    
-    // 在线感知 (无需预建地图)
-    TemporalVoxelGrid temporal_voxel_grid_;  // 时间衰减体素
-    ElevationMap elevation_map_;              // 高程图
-    TraversabilityAnalyzer traversability_;   // 可通行性
-    
-    // 规划地图
-    InflationMap inflation_map_;
-};
-```
+---
 
-## 关键算法
-1. 斜坡检测与可通行性
-``` cpp
-float computeSlopeCost(const ElevationMap& map, int x, int y) {
-    // 计算局部坡度 (用周围格子的高度差)
-    float dz_dx = (map(x+1,y).height - map(x-1,y).height) / (2 * resolution);
-    float dz_dy = (map(x,y+1).height - map(x,y-1).height) / (2 * resolution);
-    float slope = atan(sqrt(dz_dx*dz_dx + dz_dy*dz_dy));
-    
-    // 15度 ≈ 0.26 rad, 设最大可通行坡度
-    constexpr float MAX_SLOPE = 0.30;  // ~17度
-    if (slope > MAX_SLOPE) return 1.0;  // 不可通行
-    
-    return slope / MAX_SLOPE;  // 线性代价
-}
-```
-2. 狗洞检测
-``` cpp
-bool canPassDogHole(const MultiLayerOccupancy& occ, 
-                    float robot_height, float robot_width) {
-    // 狗洞条件: 地面通畅 + 有足够净空
-    // 你的机器人: 假设高度 ~35cm, 宽度 ~45cm
-    // 狗洞: 高200mm, 宽550mm
-    
-    if (occ.ground_layer) return false;  // 地面有障碍
-    if (occ.clearance < robot_height + 0.05) return false;  // 净空不足
-    
-    // 还需要检查宽度方向的通道
-    return true;
-}
-```
+## 关键话题与接口
 
-3. 起伏路段检测
+### 输入
+| 话题 | 类型 | 来源 |
+|---|---|---|
+| `/Odometry` | `nav_msgs/Odometry` | small_point_lio |
+| `/cloud_registered` | `sensor_msgs/PointCloud2` | small_point_lio |
+| `/goal_pose` | `geometry_msgs/PoseStamped` | RViz 2D Goal Pose |
 
-``` cpp
-float evaluateUndulation(const ElevationMap& map, 
-                         const Path& path_segment) {
-    // 沿路径计算高度变化
-    float max_step = 0;
-    for (size_t i = 1; i < path_segment.size(); i++) {
-        float dh = abs(map.at(path_segment[i]).height - 
-                       map.at(path_segment[i-1]).height);
-        max_step = std::max(max_step, dh);
-    }
-    
-    // 70cm起伏，检查单步高度变化是否在轮子能力范围内
-    constexpr float MAX_STEP_HEIGHT = 0.08;  // 8cm单步
-    return (max_step > MAX_STEP_HEIGHT) ? 1.0 : max_step / MAX_STEP_HEIGHT;
-}
-```
+### 中间
+| 话题 | 类型 | 发布者 | 订阅者 |
+|---|---|---|---|
+| `/global_path` | `nav_msgs/Path` | sentry_global_planner | sentry_local_planner |
+| `/sdf_map/occupancy` | `sensor_msgs/PointCloud2` | plan_env | RViz 调试 |
+| `/sdf_map/esdf` | `sensor_msgs/PointCloud2` | plan_env | RViz 调试 |
 
-## 包结构示例
+### 输出
+| 话题 | 类型 | 用途 |
+|---|---|---|
+| `/cmd_vel` | `geometry_msgs/Twist` | 底盘速度命令 |
+| `/planning/trajectory` | `nav_msgs/Path` | 当前 MINCO 轨迹（可视化）|
+| `/planning/trajectory_markers` | `visualization_msgs/MarkerArray` | 调试可视化 |
 
-``` zsh
-sentry_nav/
-├── sentry_msgs/           # 消息定义
-├── sentry_elevation_map/  # 高程图 (参考ETH elevation_mapping简化)
-├── sentry_occupancy/      # 多层占用图
-├── sentry_traversability/ # 可通行性分析
-├── sentry_planner/        # A* + 轨迹优化
-└── sentry_bringup/        # 启动文件
-```
+---
 
-## Prerequisites
+## 环境依赖
 
-ROS 2 Jazzy
-Gazebo Harmonic
-Ubuntu 24.04 (Noble Numbat)
+- **OS**：Ubuntu 24.04（Noble）
+- **ROS 2**：Jazzy Jalisco
+- **仿真**：Gazebo Harmonic
+- **C++**：≥ C++17
+- **第三方库**：Eigen3、PCL、OpenCV、NLopt、tf2
 
-## Installation
-``` zsh
-sudo apt install ros-jazzy-navigation2 ros-jazzy-nav2-bringup ros-jazzy-slam-toolbox
-sudo apt install ros-jazzy-gz-tools-vendor ros-jazzy-gz-sim-vendor ros-jazzy-ros-gz
-cd ~/sentry_nav_26
-git submodule update --init --recursive
-colcon build --symlink-install
+---
 
-# 安装 NLopt 开发包
+## 安装
+
+### 1. 系统依赖
+
+```bash
 sudo apt update
-sudo apt install libnlopt-dev libnlopt-cxx-dev
+sudo apt install -y \
+    ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
+    ros-jazzy-gz-tools-vendor ros-jazzy-gz-sim-vendor ros-jazzy-ros-gz \
+    ros-jazzy-tf2-sensor-msgs ros-jazzy-tf2-eigen \
+    ros-jazzy-rmw-zenoh-cpp \
+    ros-jazzy-teleop-twist-keyboard \
+    libnlopt-dev libnlopt-cxx-dev \
+    libpcl-dev libeigen3-dev libopencv-dev
+```
 
-# 验证安装
-pkg-config --modversion nlopt
+### 2. 克隆仓库（含 submodule）
 
-# Usage
+```bash
+cd ~
+git clone --recurse-submodules <your-repo-url> sentry_nav_26
+cd sentry_nav_26
+
+# 若已 clone 但未拉 submodule
+git submodule update --init --recursive
+```
+
+### 3. 编译
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd ~/sentry_nav_26
+colcon build --symlink-install
+```
+
+### 4. 配置中间件（推荐 Zenoh）
+
+```bash
+# 写进 ~/.bashrc 或 ~/.zshrc
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+```
+
+每次启动栈前先单独跑 zenoh router（仅在第一次或重启路由时需要）：
+
+```bash
+ros2 run rmw_zenoh_cpp rmw_zenohd
+```
+
+> Zenoh 在大点云（LiDAR / 配准点云）传输和多机场景下吞吐与延迟均优于 DDS，推荐作为本项目默认 RMW。如要回退到 CycloneDDS，可使用仓库自带的 `cyclonedds.xml`。
+
+---
+
+## 快速上手
+
+### 一键启动（仿真）
+
+```bash
+# 终端 1: 启动 zenoh router
+ros2 run rmw_zenoh_cpp rmw_zenohd
+
+# 终端 2: 启动仿真 + 导航栈
 source ~/sentry_nav_26/install/setup.bash
 ros2 launch sentry_bringup bringup.launch.py
 ```
 
+`bringup.launch.py` 通过 `sim_test.launch.py` 串起：
 
-祝你的 RM 哨兵导航系统开发顺利！如果遇到问题随时可以问喵～
+| 时序 | 组件 |
+|---|---|
+| t = 0 | RMUC 2025 Gazebo 世界 + ros_gz_bridge |
+| t = 0 | RViz2 + 静态 `map → odom` TF（占位）|
+| t = 0 | 新终端启动 teleop_twist_keyboard |
+| t = 6s | small_point_lio（等待 Gazebo 就绪）|
+| t = 12s | sentry_local_planner + sentry_global_planner |
 
-几个小提醒：
+延迟启动是为了让 LIO 在规划器启动前完成初始化。
 
-高程图更新频率要和车速匹配，5m/s 大概需要 10-20Hz
-狗洞检测记得考虑机器人的姿态变化（过狗洞时可能需要低头）
-起伏路段可以用样条插值平滑高程图，减少噪声影响
-加油喵！期待看到你的成果！🎮🤖
+### 发送目标点
 
-关键数据流
+启动后在 RViz2 中点击 **2D Goal Pose**，目标会发布到 `/goal_pose`，全局规划器输出 `/global_path`，局部规划器跟踪并发出 `/cmd_vel`。
 
-```cpp
-// 每帧更新流程
-void SentryNavigation::update(const PointCloud& cloud, const Pose& pose) {
-    // 1. STVL风格：时间衰减 + 视锥清除
-    temporal_voxel_grid_.decayVoxels(current_time);
-    temporal_voxel_grid_.clearFrustum(sensor_frustum);
-    temporal_voxel_grid_.insertPoints(cloud);
-    
-    // 2. 高程图更新
-    elevation_map_.update(cloud, pose);
-    
-    // 3. 可通行性分析
-    traversability_.analyze(
-        temporal_voxel_grid_,  // 障碍物
-        elevation_map_         // 地形
-    );
-    
-    // 4. ROG-Map风格：膨胀 + 可选ESDF
-    inflation_map_.update(traversability_.getOccupancyGrid());
-    // esdf_.update(inflation_map_);  // 如果需要轨迹优化
-}
-```
-具体实现建议
-1. 用STVL处理动态环境
-``` cpp
-// 直接用或参考STVL的时间衰减模型
-struct TemporalVoxel {
-    double timestamp;      // 标记时间
-    uint8_t occupancy;     // 占用状态
-    
-    bool isExpired(double now, double decay_time) const {
-        return (now - timestamp) > decay_time;
-    }
-};
+### 单独调试某节点
+
+```bash
+# 只启动局部规划器（需要外部 odom + goal）
+ros2 launch sentry_local_planner planner.launch.py
+
+# 只启动全局规划器
+ros2 launch sentry_global_planner global_planner.launch.py \
+    map_yaml:=$HOME/sentry_nav_26/src/sentry_bringup/map/rmuc_2025.yaml
+
+# GDB 启动局部规划器（崩溃排查）
+./debug_planner.sh
 ```
 
-2. 增加高程层
+### 重启 LIO（独立调试）
 
-```cpp
-// 在STVL基础上加高程信息
-struct TerrainCell {
-    float ground_height;     // 地面高度
-    float clearance;         // 头顶净空
-    float slope;             // 坡度
-    bool passable;           // 可通行性
-};
+```bash
+source install/setup.zsh
+timeout 15 ros2 run small_point_lio small_point_lio_node \
+    --ros-args --params-file install/small_point_lio/share/small_point_lio/config/simulation.yaml
 ```
-3. 简化ESDF为2.5D
-``` cpp
-// 不需要完整3D ESDF，只在地面层计算
-class SimplifiedESDF2D {
-    // 只计算 (x, y) 到最近障碍物的距离
-    // 比完整3D ESDF快很多
-    float getDistance(float x, float y) const;
-    Vec2f getGradient(float x, float y) const;
-};
-```
-最终包结构
 
-``` zsh
-sentry_nav/
-├── sentry_perception/          # 感知层
-│   ├── temporal_voxel_grid.hpp   # 借鉴STVL
-│   ├── elevation_map.hpp         # 高程图
-│   └── traversability.hpp        # 可通行性
-├── sentry_map/                 # 地图层
-│   ├── inflation_map.hpp         # 借鉴ROG-Map
-│   └── esdf_2d.hpp               # 简化ESDF
-├── sentry_planner/             # 规划层
-│   ├── astar_search.hpp
-│   └── trajectory_opt.hpp
-└── sentry_bringup/             # 启动
-```
-开发路线
-Week 1-2: temporal_voxel_grid + elevation_map (感知基础)
-Week 3: traversability (狗洞/坡度分析)
-Week 4: inflation_map + esdf_2d (地图层)
-Week 5-6: astar_search + trajectory_opt (规划层)
-这样既有STVL的动态场景处理能力，又有ROG-Map的轨迹优化支持，还加入了你需要的地形分析喵！🎮✨
+---
 
+## 关键参数
 
-License
+### 局部规划器（`sentry_local_planner/config/planner_params.yaml`）
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `controller.control_freq` | 50 Hz | MPC 控制频率 |
+| `replan.frequency` | 10 Hz | 轨迹重规划频率 |
+| `mpc.horizon` | 10 | 预测步数（horizon = N · dt = 0.2s）|
+| `mpc.q_pos / q_vel / r_acc` | 10 / 1 / 0.1 | MPC 状态/输入权重 |
+| `minco_opt.max_time_s` | 0.02 | L-BFGS 总预算（粗 40% / 精 60%）|
+| `search.max_vel / max_acc` | — | 动力学搜索的速度/加速度上限 |
+
+### 全局规划器（`sentry_global_planner/config/global_planner_params.yaml`）
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `global_map.mode` | `prior` | `prior` = 加载 PGM；`online` = 用 plan_env 实时 ESDF（**未完成**） |
+| `jps.safety_dist` | 0.3 m | ESDF 小于此值视为不可通行 |
+| `jps.esdf_weight` | 2.0 | ESDF 代价权重，越大越远离障碍 |
+| `jps.waypoint_spacing` | 1.0 m | 简化后路径点最小间距 |
+
+### 在线建图（`plan_env`，由 launch 注入）
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `sdf_map.resolusion_` | 0.05 m | 体素分辨率（**注意 yaml 里键名拼写**）|
+| `sdf_map.local_update_range_x/y` | 3.0 m | 局部窗口半径 |
+| `sdf_map.obstacles_inflation` | 视 yaml | 膨胀半径 |
+| `sdf_map.max_slope_deg` | 17° | 高程坡度阈值 |
+| `sdf_map.logodds_*` | hit 0.85 / miss -0.4 | 贝叶斯更新参数 |
+
+---
+
+## 当前实现状态
+
+| 模块 | 完成度 | 备注 |
+|---|---|---|
+| LIO 定位 | ✅ | 通过 submodule |
+| 在线 2D occupancy + ESDF | ✅ | log-odds + Felzenszwalb |
+| 高程图 / 坡度估计 | 🟡 | `elevation_buffer_` 已建，坡度只用于点云过滤，未进入代价 |
+| 多层占用（狗洞净空检测）| ❌ | 未实现 |
+| 时间衰减体素 (STVL) | ❌ | log-odds 永久累积，无衰减 |
+| 视锥清除 | ❌ | 未实现 |
+| 可通行性融合层 | ❌ | 未实现 |
+| 全局规划 (JPS, 静态先验) | ✅ | 完整可用 |
+| 全局规划在线模式 | ❌ | `OnlineMapProxy` 已搭好，未接通 |
+| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot |
+| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS |
+| MPC 跟踪 | ✅ | LDLT，软约束 |
+| RMUC 仿真 | ✅ | submodule 提供 |
+| 真车适配 | 🟡 | 需替换 LIO 输入话题 + map→odom 全局定位 |
+
+详细的 bug 与改进项见仓外审计文档（不入版本控制）。
+
+---
+
+## 开发路线（短中期）
+
+### 短期（修 bug + 接缝）
+
+- 在线建图模式接入全局规划器（完成 `OnlineMapProxy`）
+- 局部规划器 trajectory swap 原子化（修 race）
+- 点云分支补 raycast clearing，避免动障永久残留
+- 高度过滤参数从 yaml 实际生效（透传到 `SensorProcessor`）
+
+### 中期（功能完整化）
+
+- 多层占用图（ground / body / head），实现狗洞净空判定
+- 时间衰减体素 + LiDAR 视锥清除
+- 可通行性融合层（occupancy + slope + clearance + roughness）
+- launch 改 condition-based 替代固定延迟
+
+### 长期
+
+- MINCO 时间-轨迹联合优化
+- MPC 升级到带不等式硬约束的 QP（OSQP）
+- ROS 2 LifecycleNode 改造，支持运行时重配置
+- 算法层 gtest 覆盖
+
+---
+
+## 调试小贴士
+
+- 高程更新频率应匹配车速：5 m/s 推荐 ≥ 15 Hz
+- 点云密度过大会拖慢 ESDF（20 Hz timer），可在 LIO 输出端做下采样
+- Zenoh 模式下若发现节点互相发现不到，先确认 `rmw_zenohd` router 已启动
+- 若 RViz 看到 `/sdf_map/esdf` 不连续：通常是滑窗边界，正常现象
+- 真车上线前：删除 `bringup.launch.py` 里的静态 `map→odom` TF，接入 AMCL 或视觉定位
+- 若局部规划器 NaN 崩溃：通常是 `solveQuintic` 输入 waypoints 过于贴近，检查 A* 输出去重
+
+---
+
+## 致谢
+
+- [Fast-Planner](https://github.com/HKUST-Aerial-Robotics/Fast-Planner) — kinodynamic A* / EDTEnvironment 设计参考
+- [EGO-Planner](https://github.com/ZJU-FAST-Lab/ego-planner) — MINCO 轨迹优化思路
+- [STVL](https://github.com/SteveMacenski/spatio_temporal_voxel_layer) — 时间衰减体素栅格设计参考
+- [ROG-Map](https://github.com/hku-mars/ROG-Map) — ESDF / 膨胀图实现参考
+- [Small Point-LIO](https://github.com/Aurora-UJS/small_point_lio) — LIO 定位
+- [Eclipse Zenoh](https://zenoh.io/) — ROS 2 中间件
+
+---
+
+## License
+
 BSD-3-Clause
-
-重启small_point_lio节点
-``` zsh
-source install/setup.zsh && timeout 15 ros2 run small_point_lio small_point_lio_node --ros-args --params-file install/small_point_lio/share/small_point_lio/config/simulation.yaml 2>&1
-```
