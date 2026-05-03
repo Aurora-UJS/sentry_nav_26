@@ -1,0 +1,12 @@
+.git
+.cache
+.clangd
+.vscode
+build
+install
+log
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.swp
+compile_commands.json

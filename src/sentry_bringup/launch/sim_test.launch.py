@@ -16,9 +16,9 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     ExecuteProcess,
-    GroupAction,
     TimerAction,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -27,6 +27,7 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     use_sim_time = LaunchConfiguration("use_sim_time", default="true")
+    start_teleop = LaunchConfiguration("start_teleop", default="true")
 
     # === 1. RMUC 2025 仿真环境 ===
     rmuc_sim_launch = IncludeLaunchDescription(
@@ -99,6 +100,7 @@ def generate_launch_description():
             "ros2 run teleop_twist_keyboard teleop_twist_keyboard "
             "--ros-args -p use_sim_time:=true; exec bash",
         ],
+        condition=IfCondition(start_teleop),
         output="screen",
     )
 
@@ -148,6 +150,11 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "use_sim_time", default_value="true", description="Use sim time"
+            ),
+            DeclareLaunchArgument(
+                "start_teleop",
+                default_value="true",
+                description="Start teleop_twist_keyboard in a new terminal",
             ),
             # 仿真环境
             rmuc_sim_launch,

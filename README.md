@@ -174,6 +174,81 @@ ros2 run rmw_zenoh_cpp rmw_zenohd
 
 ---
 
+## Fedora / Podman 容器开发
+
+Fedora 主机可用 Podman 运行 Ubuntu 24.04 + ROS 2 Jazzy 开发环境，避免在 Fedora 上直接适配 ROS 生态。容器镜像安装当前工程编译与仿真需要的 ROS/Gazebo 依赖；代码目录会挂载进容器，`build/`、`install/`、`log/` 仍生成在当前仓库。
+
+### 1. 主机准备
+
+```bash
+sudo dnf install -y podman xorg-x11-server-utils
+
+# Wayland 桌面通常也保留 XWayland；允许本机用户连接 X11，供 RViz/Gazebo GUI 使用
+xhost +SI:localuser:$(id -un)
+```
+
+若仓库 submodule 尚未拉取，可直接用容器执行：
+
+```bash
+./scripts/podman-dev.sh submodules
+```
+
+该命令会拉取当前仿真启动必需的 `src/rm_sim_26` 与 `src/small_point_lio`。
+
+### 2. 构建开发镜像
+
+```bash
+./scripts/podman-dev.sh build-image
+```
+
+镜像默认标签为 `localhost/sentry-nav-26:jazzy`，可通过 `SENTRY_NAV_IMAGE` 覆盖。
+构建时默认把 Ubuntu apt 源切到清华镜像，可通过 `SENTRY_NAV_UBUNTU_MIRROR` 覆盖；如 ROS 源访问不稳定，也可设置 `SENTRY_NAV_ROS_APT_MIRROR`。
+
+### 3. 安装依赖并编译
+
+```bash
+# 可选：让 rosdep 补齐 submodule 或未来新增包的系统依赖
+./scripts/podman-dev.sh deps
+
+./scripts/podman-dev.sh build
+```
+
+也可以进入容器手动执行任意 ROS 命令：
+
+```bash
+./scripts/podman-dev.sh shell
+source install/setup.bash
+colcon build --symlink-install
+```
+
+### 4. 容器内运行仿真导航
+
+推荐开三个终端，分别运行：
+
+```bash
+# 终端 1: Zenoh router
+./scripts/podman-dev.sh zenoh
+
+# 终端 2: 仿真 + 导航栈 + RViz/Gazebo
+./scripts/podman-dev.sh bringup
+
+# 终端 3: 键盘遥控
+./scripts/podman-dev.sh teleop
+```
+
+`bringup` 会以 `start_teleop:=false` 启动，避免容器内强依赖 `gnome-terminal`；需要遥控时用第三个终端单独运行 `teleop`。
+
+如需执行自定义命令：
+
+```bash
+./scripts/podman-dev.sh exec ros2 pkg list
+./scripts/podman-dev.sh exec ros2 launch sentry_local_planner planner.launch.py
+```
+
+> 图形界面依赖主机 X11/XWayland 与 `/dev/dri` 显卡设备透传。若 RViz/Gazebo 无法显示，先确认 `echo $DISPLAY` 有值，并重新运行 `xhost +SI:localuser:$(id -un)`。
+
+---
+
 ## 快速上手
 
 ### 一键启动（仿真）
