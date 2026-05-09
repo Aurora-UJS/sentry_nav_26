@@ -2,6 +2,9 @@
  * sentry_local_planner_node: Kinodynamic A* + MINCO + MPC
  */
 
+#include <memory>
+#include <mutex>
+
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -56,7 +59,7 @@ public:
         double mv = 3.0, ma = 3.0;
         this->get_parameter("search.max_vel", mv);
         this->get_parameter("search.max_acc", ma);
-        minco_traj_.setOptimizer(
+        minco_template_.setOptimizer(
             edt_env_.get(),
             this->get_parameter("minco_opt.lambda_smooth").as_double(),
             this->get_parameter("minco_opt.lambda_col").as_double(),
@@ -174,12 +177,20 @@ private:
         kino_astar_->reset();
         int result = kino_astar_->search(current_pos_, current_vel_, Eigen::Vector2d::Zero(),
                                           goal_pt, Eigen::Vector2d::Zero(), true);
-        if (result == KinodynamicAstar::NO_PATH) { has_traj_ = false; return; }
+        if (result == KinodynamicAstar::NO_PATH) {
+            std::lock_guard<std::mutex> lk(traj_mutex_);
+            has_traj_ = false;
+            return;
+        }
 
         double ts;
         std::vector<Eigen::Vector2d> point_set, start_end_derivatives;
         kino_astar_->getSamples(ts, point_set, start_end_derivatives);
-        if (point_set.size() < 2) { has_traj_ = false; return; }
+        if (point_set.size() < 2) {
+            std::lock_guard<std::mutex> lk(traj_mutex_);
+            has_traj_ = false;
+            return;
+        }
 
         // MINCO
         double max_vel = 3.0, max_acc = 3.0;
@@ -191,11 +202,28 @@ private:
         Eigen::Vector2d sa = start_end_derivatives.size() >= 4 ? start_end_derivatives[2] : Eigen::Vector2d::Zero();
         Eigen::Vector2d ea = start_end_derivatives.size() >= 4 ? start_end_derivatives[3] : Eigen::Vector2d::Zero();
 
-        minco_traj_.setup(point_set, sv, sa, ev, ea, max_vel, max_acc, this->now().seconds());
-        traj_duration_ = minco_traj_.getDuration();
-        traj_start_time_ = this->now();
-        has_traj_ = true;
-        publishTrajectory();
+        // Build the new trajectory off the hot path. minco_template_ holds the
+        // optimizer config (set once at init); copy it so each replan runs setup
+        // on a fresh instance and we never publish a half-built trajectory.
+        auto new_traj = std::make_shared<sentry_planner::MincoTrajectory>(minco_template_);
+        new_traj->setup(point_set, sv, sa, ev, ea, max_vel, max_acc, this->now().seconds());
+        if (new_traj->empty()) {
+            std::lock_guard<std::mutex> lk(traj_mutex_);
+            has_traj_ = false;
+            return;
+        }
+
+        const double new_duration = new_traj->getDuration();
+        const rclcpp::Time new_start = this->now();
+
+        {
+            std::lock_guard<std::mutex> lk(traj_mutex_);
+            active_traj_     = new_traj;
+            traj_duration_   = new_duration;
+            traj_start_time_ = new_start;
+            has_traj_        = true;
+        }
+        publishTrajectory(*new_traj, new_duration);
     }
 
     void replanCallback()
@@ -218,23 +246,43 @@ private:
     {
         if (!has_odom_) return;
 
-        double elapsed = has_traj_ ? (this->now() - traj_start_time_).seconds() : 0.0;
-
-        if (has_traj_ && elapsed >= traj_duration_)
+        // Snapshot trajectory state under lock; do all subsequent work on the
+        // local copies so a replan mid-control-cycle can't tear the state.
+        std::shared_ptr<sentry_planner::MincoTrajectory> snap;
+        double dur = 0.0;
+        rclcpp::Time start;
+        bool has = false;
         {
-            has_traj_ = false;
+            std::lock_guard<std::mutex> lk(traj_mutex_);
+            snap  = active_traj_;
+            dur   = traj_duration_;
+            start = traj_start_time_;
+            has   = has_traj_;
+        }
+
+        double elapsed = has ? (this->now() - start).seconds() : 0.0;
+
+        if (has && elapsed >= dur)
+        {
+            {
+                std::lock_guard<std::mutex> lk(traj_mutex_);
+                has_traj_ = false;
+            }
+            has = false;
             if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 1.0) {
                 RCLCPP_INFO(this->get_logger(), "Goal reached!");
                 has_final_goal_ = false;
             }
         }
 
+        static const sentry_planner::MincoTrajectory empty_traj;
+        const auto &traj_ref = (has && snap) ? *snap : empty_traj;
         auto cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
-                                     minco_traj_, elapsed, has_traj_);
+                                     traj_ref, elapsed, has && snap);
         cmd_vel_pub_->publish(cmd);
     }
 
-    void publishTrajectory()
+    void publishTrajectory(const sentry_planner::MincoTrajectory &traj, double duration)
     {
         nav_msgs::msg::Path path_msg;
         path_msg.header.stamp = this->now();
@@ -254,9 +302,9 @@ private:
         line.scale.x = 0.08;
         line.color.g = 1.0; line.color.b = 1.0; line.color.a = 1.0;
 
-        for (double t = 0; t <= traj_duration_; t += 0.05)
+        for (double t = 0; t <= duration; t += 0.05)
         {
-            Eigen::Vector2d pt = minco_traj_.getPosition(t);
+            Eigen::Vector2d pt = traj.getPosition(t);
             geometry_msgs::msg::PoseStamped pose;
             pose.header = path_msg.header;
             pose.pose.position.x = pt(0); pose.pose.position.y = pt(1);
@@ -277,7 +325,8 @@ private:
     std::shared_ptr<SDFMap> sdf_map_;
     std::shared_ptr<EDTEnvironment> edt_env_;
     std::shared_ptr<KinodynamicAstar> kino_astar_;
-    sentry_planner::MincoTrajectory minco_traj_;
+    // Holds the optimizer config set once at init; replans copy from it.
+    sentry_planner::MincoTrajectory minco_template_;
     sentry_planner::TrajectoryTracker tracker_;
 
     // State
@@ -286,6 +335,10 @@ private:
     double current_yaw_ = 0.0;
     bool has_odom_ = false;
 
+    // Trajectory state shared between replan (writer) and control (reader).
+    // All four fields below are guarded by traj_mutex_.
+    mutable std::mutex traj_mutex_;
+    std::shared_ptr<sentry_planner::MincoTrajectory> active_traj_;
     double traj_duration_ = 0.0;
     rclcpp::Time traj_start_time_;
     bool has_traj_ = false;
