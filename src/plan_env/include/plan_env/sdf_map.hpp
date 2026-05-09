@@ -86,9 +86,6 @@ private:
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_publisher_;
   std::vector<std::shared_ptr<nav_msgs::msg::OccupancyGrid>> map_msgs;
 
-  // 高度过滤参数 (ROS 参数读取后缓存)
-  double cloud_min_height_ = -0.1, cloud_max_height_ = 1.0;
-
   // ROS 回调
   void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom);
   void laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &laser_msg);

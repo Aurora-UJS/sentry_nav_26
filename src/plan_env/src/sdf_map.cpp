@@ -108,8 +108,8 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 		std::string cloud_topic = node_->declare_parameter<std::string>("sdf_map.cloud_topic", "/cloud_registered");
 		RCLCPP_INFO(node_->get_logger(), "Using PointCloud2 input on topic: %s", cloud_topic.c_str());
 
-		cloud_min_height_ = node_->declare_parameter<double>("sdf_map.cloud_min_height", -0.1);
-		cloud_max_height_ = node_->declare_parameter<double>("sdf_map.cloud_max_height", 1.0);
+		mp.cloud_min_height_ = node_->declare_parameter<double>("sdf_map.cloud_min_height", -0.1);
+		mp.cloud_max_height_ = node_->declare_parameter<double>("sdf_map.cloud_max_height", 1.0);
 
 		cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
 			cloud_topic, rclcpp::SensorDataQoS(),

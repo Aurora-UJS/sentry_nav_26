@@ -39,6 +39,10 @@ struct MappingParameters
   double step_height_max_;
   bool show_esdf_time_, show_occ_time_;
 
+  // 点云高度过滤窗口 (相对机器人 z 的偏移)，仅 cloud 输入路径使用
+  double cloud_min_height_ = -0.1;
+  double cloud_max_height_ = 1.0;
+
   // Log-odds 贝叶斯占据更新参数
   double logodds_hit_, logodds_miss_;
   double logodds_max_, logodds_min_;

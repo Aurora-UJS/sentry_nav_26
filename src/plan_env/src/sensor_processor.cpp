@@ -10,12 +10,9 @@ void SensorProcessor::processCloud(const pcl::PointCloud<pcl::PointXYZ> &cloud_3
     auto &md = core_->md_;
     auto &mp = core_->mp_;
 
-    double min_h = -0.1, max_h = 1.0;
-    // 这些参数应该通过 MapCore 的 mp_ 传入，暂时用 mp_ 中的坡度参数
-    // 实际 min_h/max_h 在 SDFMap::initMap 中从 ROS 参数读取并设置
-
-    min_h += robot_z;
-    max_h += robot_z;
+    // 高度窗口由 sdf_map.cloud_{min,max}_height 在 SDFMap::initMap 写入 mp
+    const double min_h = mp.cloud_min_height_ + robot_z;
+    const double max_h = mp.cloud_max_height_ + robot_z;
 
     core_->slideMapTo(robot_pos);
 
