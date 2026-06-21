@@ -10,6 +10,9 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 #include <plan_env/sdf_map.hpp>
 #include <plan_env/edt_environment.hpp>
 #include <path_searching/kinodynamic_astar.hpp>
@@ -70,9 +73,14 @@ public:
 
         // --- Init TrajectoryTracker ---
         this->declare_parameter<double>("controller.frequency", 50.0);
-        this->declare_parameter<double>("controller.spin_rate", 3.0);
+        this->declare_parameter<double>("controller.kp", 2.0);
+        this->declare_parameter<double>("controller.lookahead_time", 0.2);
+        this->declare_parameter<double>("controller.spin_rate", 0.0);
         this->declare_parameter<double>("controller.narrow_passage_dist", 0.5);
-        this->declare_parameter<double>("controller.yaw_align_kp", 3.0);
+        this->declare_parameter<double>("controller.yaw_align_kp", 1.2);
+        this->declare_parameter<double>("controller.max_yaw_rate", 0.8);
+        this->declare_parameter<double>("controller.max_yaw_acc", 1.5);
+        this->declare_parameter<bool>("controller.follow_path_yaw", true);
         this->declare_parameter<int>("mpc.horizon", 10);
         this->declare_parameter<double>("mpc.q_pos", 10.0);
         this->declare_parameter<double>("mpc.q_vel", 1.0);
@@ -84,9 +92,14 @@ public:
         tcfg.max_vel = mv;
         tcfg.max_acc = ma;
         tcfg.ctrl_dt = 1.0 / ctrl_freq;
+        tcfg.tracking_kp = this->get_parameter("controller.kp").as_double();
+        tcfg.lookahead_time = this->get_parameter("controller.lookahead_time").as_double();
         tcfg.spin_rate = this->get_parameter("controller.spin_rate").as_double();
         tcfg.narrow_passage_dist = this->get_parameter("controller.narrow_passage_dist").as_double();
         tcfg.yaw_align_kp = this->get_parameter("controller.yaw_align_kp").as_double();
+        tcfg.max_yaw_rate = this->get_parameter("controller.max_yaw_rate").as_double();
+        tcfg.max_yaw_acc = this->get_parameter("controller.max_yaw_acc").as_double();
+        tcfg.follow_path_yaw = this->get_parameter("controller.follow_path_yaw").as_bool();
         tcfg.mpc_horizon = this->get_parameter("mpc.horizon").as_int();
         tcfg.mpc_q_pos = this->get_parameter("mpc.q_pos").as_double();
         tcfg.mpc_q_vel = this->get_parameter("mpc.q_vel").as_double();
@@ -94,18 +107,10 @@ public:
         tracker_.init(tcfg, edt_env_.get());
 
         // --- Subscribers ---
+        std::string odom_topic = this->get_parameter("manager.odometry").as_string();
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/Odometry", 10,
-            [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-                current_pos_(0) = msg->pose.pose.position.x;
-                current_pos_(1) = msg->pose.pose.position.y;
-                current_vel_(0) = msg->twist.twist.linear.x;
-                current_vel_(1) = msg->twist.twist.linear.y;
-                double qw = msg->pose.pose.orientation.w;
-                double qz = msg->pose.pose.orientation.z;
-                current_yaw_ = 2.0 * atan2(qz, qw);
-                has_odom_ = true;
-            });
+            odom_topic, 10,
+            std::bind(&SentryLocalPlannerNode::odomCallback, this, std::placeholders::_1));
 
         goal_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "/goal_pose", 10,
@@ -134,7 +139,7 @@ public:
             std::chrono::duration<double>(1.0 / ctrl_freq),
             std::bind(&SentryLocalPlannerNode::controlLoop, this));
 
-        this->declare_parameter<double>("replan.frequency", 10.0);
+        this->declare_parameter<double>("replan.frequency", 2.0);
         double replan_freq = this->get_parameter("replan.frequency").as_double();
         replan_timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0 / replan_freq),
@@ -144,6 +149,58 @@ public:
     }
 
 private:
+    void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+        Eigen::Vector2d pos(msg->pose.pose.position.x, msg->pose.pose.position.y);
+        double yaw = yawFromQuaternion(msg->pose.pose.orientation);
+
+        rclcpp::Time stamp(msg->header.stamp);
+        if (stamp.nanoseconds() == 0) stamp = this->now();
+
+        Eigen::Vector2d measured_vel = twistToOdomVelocity(msg, yaw);
+        if (has_last_odom_)
+        {
+            double dt = (stamp - last_odom_stamp_).seconds();
+            if (dt > 1e-4 && dt < 0.5)
+            {
+                measured_vel = (pos - last_odom_pos_) / dt;
+            }
+        }
+
+        if (!isFinite(measured_vel)) measured_vel.setZero();
+        if (!has_velocity_estimate_) current_vel_ = measured_vel;
+        else current_vel_ = 0.5 * current_vel_ + 0.5 * measured_vel;
+
+        current_pos_ = pos;
+        current_yaw_ = yaw;
+        has_odom_ = true;
+        has_velocity_estimate_ = true;
+        last_odom_pos_ = pos;
+        last_odom_stamp_ = stamp;
+        has_last_odom_ = true;
+    }
+
+    static double yawFromQuaternion(const geometry_msgs::msg::Quaternion &q)
+    {
+        double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+        double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+        return std::atan2(siny_cosp, cosy_cosp);
+    }
+
+    static Eigen::Vector2d twistToOdomVelocity(const nav_msgs::msg::Odometry::SharedPtr &msg, double yaw)
+    {
+        Eigen::Vector2d vel_body(msg->twist.twist.linear.x, msg->twist.twist.linear.y);
+        double cy = std::cos(yaw), sy = std::sin(yaw);
+        return Eigen::Vector2d(
+            cy * vel_body(0) - sy * vel_body(1),
+            sy * vel_body(0) + cy * vel_body(1));
+    }
+
+    static bool isFinite(const Eigen::Vector2d &v)
+    {
+        return std::isfinite(v(0)) && std::isfinite(v(1));
+    }
+
     void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
         if (!has_odom_) { RCLCPP_WARN(this->get_logger(), "No odom yet"); return; }
@@ -285,6 +342,10 @@ private:
     Eigen::Vector2d current_vel_ = Eigen::Vector2d::Zero();
     double current_yaw_ = 0.0;
     bool has_odom_ = false;
+    bool has_velocity_estimate_ = false;
+    Eigen::Vector2d last_odom_pos_ = Eigen::Vector2d::Zero();
+    rclcpp::Time last_odom_stamp_;
+    bool has_last_odom_ = false;
 
     double traj_duration_ = 0.0;
     rclcpp::Time traj_start_time_;
