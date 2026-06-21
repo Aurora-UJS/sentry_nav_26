@@ -51,9 +51,13 @@ sentry_local_planner:
     controller:
       frequency: 50.0              # 控制频率 50Hz
       kp: 2.0                      # PD 位置误差增益
-      spin_rate: 3.0               # 自转角速度 (rad/s)，改善 LiDAR 覆盖
+      lookahead_time: 0.2          # 跟踪前视时间，避免频繁重规划时长期卡在低速起步段
+      spin_rate: 0.0               # 无轨迹/开阔区自转角速度；LIO 仿真中默认关闭，避免点云发散
       narrow_passage_dist: 0.5     # ESDF 距离 < 此值时停止自转，切换为航向对齐 (m)
-      yaw_align_kp: 3.0            # 窄口航向对齐 P 增益
+      yaw_align_kp: 1.2            # 窄口/路径航向对齐 P 增益
+      max_yaw_rate: 0.8            # 航向跟踪角速度限幅 (rad/s)，过大会让 LIO 点云配准发散
+      max_yaw_acc: 1.5             # 航向角加速度限幅 (rad/s^2)，避免 angular.z 阶跃
+      follow_path_yaw: true        # 移动时车头跟随轨迹方向；false 时恢复开阔区域自转
 
     # --- MPC 参数 ---
     mpc:
@@ -89,7 +93,7 @@ sentry_local_planner:
 
     # --- 主动重规划参数 ---
     replan:
-      frequency: 10.0             # 主动重规划频率 (Hz)，始终保持轨迹最优
+      frequency: 2.0              # 主动重规划频率 (Hz)，避免控制器长期停留在新轨迹低速起步段
 
     # --- MINCO 梯度优化参数 ---
     minco_opt:

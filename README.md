@@ -308,8 +308,8 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `controller.control_freq` | 50 Hz | MPC 控制频率 |
-| `replan.frequency` | 10 Hz | 轨迹重规划频率 |
+| `controller.frequency` | 50 Hz | MPC 控制频率 |
+| `replan.frequency` | 2 Hz | 轨迹重规划频率 |
 | `mpc.horizon` | 10 | 预测步数（horizon = N · dt = 0.2s）|
 | `mpc.q_pos / q_vel / r_acc` | 10 / 1 / 0.1 | MPC 状态/输入权重 |
 | `minco_opt.max_time_s` | 0.02 | L-BFGS 总预算（粗 40% / 精 60%）|
