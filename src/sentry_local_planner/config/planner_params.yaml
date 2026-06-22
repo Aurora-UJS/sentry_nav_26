@@ -102,6 +102,7 @@ sentry_local_planner:
       lambda_feas: 0.001           # 动力学可行性惩罚
       robot_radius: 0.3            # 车体半径，用于 footprint 碰撞检测
       dist0: 0.05                  # ESDF 安全阈值：footprint 点距墙小于此值才产生代价（小值，安全由 robot_radius 保证）
+      dist0_vel_k: 0.0             # 速度相关裕度：dist0_eff = dist0 + dist0_vel_k*|v|。0=关闭(默认)；高速调参建议 0.05~0.1，会改 MINCO 轨迹行为需仿真验证
       num_samples: 8               # 每段采样点数
       max_iter: 200                # L-BFGS 最大迭代次数
       max_time_ms: 20.0            # 最大优化时间 (ms)

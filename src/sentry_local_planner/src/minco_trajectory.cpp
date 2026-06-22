@@ -7,7 +7,7 @@ namespace sentry_planner
 
 void MincoTrajectory::setOptimizer(sentry_nav::EnvironmentInterface* env,
                                    double lambda_smooth, double lambda_col, double lambda_feas,
-                                   double dist0, double max_vel, double max_acc,
+                                   double dist0, double dist0_vel_k, double max_vel, double max_acc,
                                    double robot_radius, int num_samples, int max_iter, double max_time_s)
 {
     edt_env_       = env;
@@ -15,6 +15,7 @@ void MincoTrajectory::setOptimizer(sentry_nav::EnvironmentInterface* env,
     lambda_col_    = lambda_col;
     lambda_feas_   = lambda_feas;
     dist0_         = dist0;
+    dist0_vel_k_   = dist0_vel_k;
     max_vel_       = max_vel;
     max_acc_       = max_acc;
     robot_radius_  = robot_radius;
@@ -22,13 +23,15 @@ void MincoTrajectory::setOptimizer(sentry_nav::EnvironmentInterface* env,
     max_iter_      = max_iter;
     max_time_s_    = max_time_s;
 
-    footprint_offsets_ = {
-        Eigen::Vector2d(0, 0),
-        Eigen::Vector2d( robot_radius_, 0),
-        Eigen::Vector2d(-robot_radius_, 0),
-        Eigen::Vector2d(0,  robot_radius_),
-        Eigen::Vector2d(0, -robot_radius_),
-    };
+    // M=12 points evenly spaced on the disc PERIMETER (no center point) so the
+    // collision cost samples diagonal directions and stays diagonal-safe.
+    footprint_offsets_.clear();
+    for (int k = 0; k < 12; ++k)
+    {
+        double ang = k * 2.0 * M_PI / 12.0;
+        footprint_offsets_.push_back(
+            Eigen::Vector2d(robot_radius_ * std::cos(ang), robot_radius_ * std::sin(ang)));
+    }
 }
 
 void MincoTrajectory::setup(const std::vector<Eigen::Vector2d> &waypoints,
@@ -310,9 +313,33 @@ double MincoTrajectory::calcCollisionCost(std::vector<double> &grad_x)
             double tau = (k + 0.5) * dt;
             Eigen::Vector2d pos = segments_[i].pos(tau);
 
+            // Velocity-dependent safety margin (#7): demand more clearance the
+            // faster we move (absorbs LIO jitter + control latency / braking
+            // distance). dist0_vel_k_ defaults to 0 (off); raise it when tuning
+            // for high speed. dist0_eff depends on velocity, but its gradient
+            // w.r.t. the control points is intentionally NOT propagated — only the
+            // ESDF / position gradient drives the optimizer; this is a soft margin.
+            const double dist0_eff = dist0_ + dist0_vel_k_ * segments_[i].vel(tau).norm();
+
             double dpq_end   = tau*tau*tau * alpha + tau*tau*tau*tau * beta +
                                tau*tau*tau*tau*tau * gamma;
             double dpq_start = 1.0 - dpq_end;
+
+            // Two-level Lipschitz pruning (STATIC branch only). The ESDF is
+            // 1-Lipschitz, so every perimeter point satisfies
+            // ESDF(point) >= center_dist - robot_radius_. Hence if
+            // center_dist >= robot_radius_ + dist0_eff, no perimeter point can be
+            // within dist0_eff -> the footprint contributes zero cost/grad, so we
+            // skip the 12-point loop. The dynamic-objects branch runs all 12.
+            bool use_dynamic = (traj_start_time_ >= 0.0 && edt_env_->hasDynamicObjects());
+            if (!use_dynamic)
+            {
+                double center_dist;
+                Eigen::Vector2d center_grad;
+                edt_env_->evaluateEDTWithGrad(pos, -1.0, center_dist, center_grad);
+                if (center_dist >= robot_radius_ + dist0_eff)
+                    continue;
+            }
 
             for (const auto &offset : footprint_offsets_)
             {
@@ -337,9 +364,9 @@ double MincoTrajectory::calcCollisionCost(std::vector<double> &grad_x)
                     edt_env_->evaluateEDTWithGrad(fp, -1.0, dist, esdf_grad);
                 }
 
-                if (dist < dist0_)
+                if (dist < dist0_eff)
                 {
-                    double pen = dist - dist0_;
+                    double pen = dist - dist0_eff;
                     cost += pen * pen;
 
                     Eigen::Vector2d grad_used = esdf_grad;

@@ -63,6 +63,7 @@ public:
         this->declare_parameter<double>("minco_opt.lambda_col",    8.0);
         this->declare_parameter<double>("minco_opt.lambda_feas",   0.001);
         this->declare_parameter<double>("minco_opt.dist0",         0.05);
+        this->declare_parameter<double>("minco_opt.dist0_vel_k",   0.0);
         this->declare_parameter<double>("minco_opt.robot_radius",  0.3);
         this->declare_parameter<int>   ("minco_opt.num_samples",   8);
         this->declare_parameter<int>   ("minco_opt.max_iter",      200);
@@ -77,6 +78,7 @@ public:
             this->get_parameter("minco_opt.lambda_col").as_double(),
             this->get_parameter("minco_opt.lambda_feas").as_double(),
             this->get_parameter("minco_opt.dist0").as_double(),
+            this->get_parameter("minco_opt.dist0_vel_k").as_double(),
             mv, ma,
             this->get_parameter("minco_opt.robot_radius").as_double(),
             this->get_parameter("minco_opt.num_samples").as_int(),

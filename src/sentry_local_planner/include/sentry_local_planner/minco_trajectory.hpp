@@ -49,7 +49,7 @@ public:
 
     void setOptimizer(sentry_nav::EnvironmentInterface* env,
                       double lambda_smooth, double lambda_col, double lambda_feas,
-                      double dist0, double max_vel, double max_acc,
+                      double dist0, double dist0_vel_k, double max_vel, double max_acc,
                       double robot_radius = 0.3,
                       int num_samples = 8, int max_iter = 200, double max_time_s = 0.02);
 
@@ -81,6 +81,7 @@ private:
     double lambda_col_    = 8.0;
     double lambda_feas_   = 0.001;
     double dist0_         = 0.5;
+    double dist0_vel_k_   = 0.0;   // 速度相关裕度系数: dist0_eff = dist0 + dist0_vel_k*|v|; 0=关闭
     double max_vel_       = 3.0;
     double max_acc_       = 3.0;
     double robot_radius_  = 0.3;
