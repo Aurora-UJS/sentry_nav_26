@@ -106,3 +106,17 @@ sentry_local_planner:
       num_samples: 8               # 每段采样点数
       max_iter: 200                # L-BFGS 最大迭代次数
       max_time_ms: 20.0            # 最大优化时间 (ms)
+
+    # --- 脱困恢复参数 ("走不通就换一条路径": reroute 扇 → ESDF 后退 → 原地转) ---
+    recovery:
+      fan_offsets_deg: [20.0, 40.0, 60.0, 90.0, 120.0, 150.0, 180.0]  # reroute 角度扇(相对目标方位，先小后大)
+      fan_radius_scales: [1.0, 0.66, 0.4]   # 候选子目标距离 = 该比例 × 局部范围
+      max_astar_attempts: 8                 # 每次失败时 reroute 的 A* 搜索预算(防卡顿)
+      candidate_clearance_margin: 0.1       # 候选点 ESDF 须 > robot_radius + 此值才尝试
+      backoff_distance: 0.45                # 后退步长 (m)，沿 ESDF 梯度远离障碍
+      backoff_max_vel_scale: 0.5            # 后退轨迹限速 = 此比例 × max_vel
+      backoff_cooldown_cycles: 2            # 两次后退之间至少间隔的 replan 拍数
+      rotate_enable: true                   # 无法后退时是否原地转向重新对准目标
+      rotate_yaw_rate: 0.6                  # 原地转角速度 (rad/s)
+      rotate_max_time: 1.5                  # 原地转最长时间 (s) 后重试 reroute
+      global_cycle_cap: 5                   # 非改善型恢复循环上限，超出进入 SAFE_IDLE 保持(有进展的后退会重置)
