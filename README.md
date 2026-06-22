@@ -46,7 +46,7 @@ sentry_nav_26/
 │   │   └── global_map.hpp           # PGM 加载 + 静态 ESDF + OnlineMapProxy
 │   │
 │   ├── sentry_local_planner/    # MINCO + MPC 局部规划与控制
-│   │   ├── sentry_local_planner_node.cpp   # 顶层节点（10Hz replan + 50Hz control）
+│   │   ├── sentry_local_planner_node.cpp   # 顶层节点（2Hz replan + 50Hz control，多线程 executor）
 │   │   ├── minco_trajectory.cpp            # MINCO 轨迹生成 + L-BFGS 优化
 │   │   ├── trajectory_tracker.cpp          # MPC ↔ 轨迹接口
 │   │   └── mpc_controller.hpp              # LDLT 求解的二阶 MPC
@@ -80,7 +80,7 @@ small_point_lio  ──►  /Odometry (高频位姿)
    │
    └──► sentry_local_planner
            ├─ 订阅 /Odometry, /goal_pose, /global_path
-           ├─ KinodynamicAstar 在 EDTEnvironment 上搜索 (10Hz)
+           ├─ KinodynamicAstar 在 EDTEnvironment 上搜索 (2Hz)
            ├─ MINCO 五次轨迹 + L-BFGS 优化 (粗 8ms / 精 12ms)
            └─ MPC 跟踪 (50Hz) ──►  /cmd_vel
 ```
@@ -364,9 +364,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 ### 短期（修 bug + 接缝）
 
 - 在线建图模式接入全局规划器（完成 `OnlineMapProxy`）
-- 局部规划器 trajectory swap 原子化（修 race）
-- 点云分支补 raycast clearing，避免动障永久残留
-- 高度过滤参数从 yaml 实际生效（透传到 `SensorProcessor`）
+- 重规划频率从 2Hz 提到 ~10Hz（多线程 executor 已就位，需验证不引入低速起步抖动）
 
 ### 中期（功能完整化）
 
