@@ -22,9 +22,14 @@ public:
         double max_vel = 3.0;
         double max_acc = 3.0;
         double ctrl_dt = 0.02;
-        double spin_rate = 3.0;
+        double tracking_kp = 2.0;
+        double lookahead_time = 0.2;
+        double spin_rate = 0.0;
         double narrow_passage_dist = 0.5;
-        double yaw_align_kp = 3.0;
+        double yaw_align_kp = 1.2;
+        double max_yaw_rate = 0.8;
+        double max_yaw_acc = 1.5;
+        bool follow_path_yaw = true;
         int mpc_horizon = 10;
         double mpc_q_pos = 10.0;
         double mpc_q_vel = 1.0;
@@ -51,10 +56,13 @@ private:
     double computeAngularVelocity(
         const Eigen::Vector2d &pos, double yaw,
         const MincoTrajectory &traj, double elapsed);
+    double limitYawRate(double target_yaw_rate);
 
     Config cfg_;
     MPCController mpc_;
     sentry_nav::EnvironmentInterface *env_ = nullptr;
+    double last_yaw_rate_cmd_ = 0.0;
+    bool has_yaw_rate_cmd_ = false;
 };
 
 } // namespace sentry_planner

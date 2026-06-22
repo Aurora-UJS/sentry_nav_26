@@ -13,6 +13,9 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 #include <plan_env/sdf_map.hpp>
 #include <plan_env/edt_environment.hpp>
 #include <path_searching/kinodynamic_astar.hpp>
@@ -34,6 +37,15 @@ public:
     {
         auto node_ptr = this->shared_from_this();
 
+        // Only the 50 Hz control loop gets its own callback group, so it is never
+        // blocked by the heavy replan (A*+MINCO) or the map/ESDF update. Replan, goal,
+        // global_path AND every SDFMap callback (esdf/cloud/odom/vis, default group)
+        // deliberately share the node's DEFAULT mutually-exclusive group: that
+        // serialises the map writes (updateESDF2d / processCloud) against the map reads
+        // in A*/MINCO, so planning never observes a half-updated ESDF. Do NOT give the
+        // SDFMap callbacks their own group without first adding a map-side lock.
+        control_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+
         // --- Init plan_env ---
         sdf_map_ = std::make_shared<SDFMap>();
         sdf_map_->initMap(node_ptr);
@@ -51,6 +63,7 @@ public:
         this->declare_parameter<double>("minco_opt.lambda_col",    8.0);
         this->declare_parameter<double>("minco_opt.lambda_feas",   0.001);
         this->declare_parameter<double>("minco_opt.dist0",         0.05);
+        this->declare_parameter<double>("minco_opt.dist0_vel_k",   0.0);
         this->declare_parameter<double>("minco_opt.robot_radius",  0.3);
         this->declare_parameter<int>   ("minco_opt.num_samples",   8);
         this->declare_parameter<int>   ("minco_opt.max_iter",      200);
@@ -65,6 +78,7 @@ public:
             this->get_parameter("minco_opt.lambda_col").as_double(),
             this->get_parameter("minco_opt.lambda_feas").as_double(),
             this->get_parameter("minco_opt.dist0").as_double(),
+            this->get_parameter("minco_opt.dist0_vel_k").as_double(),
             mv, ma,
             this->get_parameter("minco_opt.robot_radius").as_double(),
             this->get_parameter("minco_opt.num_samples").as_int(),
@@ -73,9 +87,14 @@ public:
 
         // --- Init TrajectoryTracker ---
         this->declare_parameter<double>("controller.frequency", 50.0);
-        this->declare_parameter<double>("controller.spin_rate", 3.0);
+        this->declare_parameter<double>("controller.kp", 2.0);
+        this->declare_parameter<double>("controller.lookahead_time", 0.2);
+        this->declare_parameter<double>("controller.spin_rate", 0.0);
         this->declare_parameter<double>("controller.narrow_passage_dist", 0.5);
-        this->declare_parameter<double>("controller.yaw_align_kp", 3.0);
+        this->declare_parameter<double>("controller.yaw_align_kp", 1.2);
+        this->declare_parameter<double>("controller.max_yaw_rate", 0.8);
+        this->declare_parameter<double>("controller.max_yaw_acc", 1.5);
+        this->declare_parameter<bool>("controller.follow_path_yaw", true);
         this->declare_parameter<int>("mpc.horizon", 10);
         this->declare_parameter<double>("mpc.q_pos", 10.0);
         this->declare_parameter<double>("mpc.q_vel", 1.0);
@@ -87,9 +106,14 @@ public:
         tcfg.max_vel = mv;
         tcfg.max_acc = ma;
         tcfg.ctrl_dt = 1.0 / ctrl_freq;
+        tcfg.tracking_kp = this->get_parameter("controller.kp").as_double();
+        tcfg.lookahead_time = this->get_parameter("controller.lookahead_time").as_double();
         tcfg.spin_rate = this->get_parameter("controller.spin_rate").as_double();
         tcfg.narrow_passage_dist = this->get_parameter("controller.narrow_passage_dist").as_double();
         tcfg.yaw_align_kp = this->get_parameter("controller.yaw_align_kp").as_double();
+        tcfg.max_yaw_rate = this->get_parameter("controller.max_yaw_rate").as_double();
+        tcfg.max_yaw_acc = this->get_parameter("controller.max_yaw_acc").as_double();
+        tcfg.follow_path_yaw = this->get_parameter("controller.follow_path_yaw").as_bool();
         tcfg.mpc_horizon = this->get_parameter("mpc.horizon").as_int();
         tcfg.mpc_q_pos = this->get_parameter("mpc.q_pos").as_double();
         tcfg.mpc_q_vel = this->get_parameter("mpc.q_vel").as_double();
@@ -97,18 +121,13 @@ public:
         tracker_.init(tcfg, edt_env_.get());
 
         // --- Subscribers ---
+        std::string odom_topic = this->get_parameter("manager.odometry").as_string();
+        rclcpp::SubscriptionOptions odom_sub_opts;
+        odom_sub_opts.callback_group = control_cb_group_;
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            "/Odometry", 10,
-            [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
-                current_pos_(0) = msg->pose.pose.position.x;
-                current_pos_(1) = msg->pose.pose.position.y;
-                current_vel_(0) = msg->twist.twist.linear.x;
-                current_vel_(1) = msg->twist.twist.linear.y;
-                double qw = msg->pose.pose.orientation.w;
-                double qz = msg->pose.pose.orientation.z;
-                current_yaw_ = 2.0 * atan2(qz, qw);
-                has_odom_ = true;
-            });
+            odom_topic, 10,
+            std::bind(&SentryLocalPlannerNode::odomCallback, this, std::placeholders::_1),
+            odom_sub_opts);
 
         goal_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "/goal_pose", 10,
@@ -135,9 +154,10 @@ public:
         // --- Timers ---
         ctrl_timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0 / ctrl_freq),
-            std::bind(&SentryLocalPlannerNode::controlLoop, this));
+            std::bind(&SentryLocalPlannerNode::controlLoop, this),
+            control_cb_group_);
 
-        this->declare_parameter<double>("replan.frequency", 10.0);
+        this->declare_parameter<double>("replan.frequency", 2.0);
         double replan_freq = this->get_parameter("replan.frequency").as_double();
         replan_timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0 / replan_freq),
@@ -147,17 +167,96 @@ public:
     }
 
 private:
+    void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+        Eigen::Vector2d pos(msg->pose.pose.position.x, msg->pose.pose.position.y);
+        double yaw = yawFromQuaternion(msg->pose.pose.orientation);
+
+        rclcpp::Time stamp(msg->header.stamp);
+        if (stamp.nanoseconds() == 0) stamp = this->now();
+
+        Eigen::Vector2d measured_vel = twistToOdomVelocity(msg, yaw);
+        if (has_last_odom_)
+        {
+            double dt = (stamp - last_odom_stamp_).seconds();
+            if (dt > 1e-4 && dt < 0.5)
+            {
+                measured_vel = (pos - last_odom_pos_) / dt;
+            }
+        }
+
+        if (!isFinite(measured_vel)) measured_vel.setZero();
+
+        // Smooth into the control-group-local accumulator so the new value is a
+        // local before we ever touch the shared current_vel_. (odom is the sole
+        // writer of current_vel_ and runs mutually-exclusively, so smoothed_vel_
+        // mirrors current_vel_ exactly; this keeps current_vel_ access lock-only.)
+        if (!has_velocity_estimate_) smoothed_vel_ = measured_vel;
+        else smoothed_vel_ = 0.5 * smoothed_vel_ + 0.5 * measured_vel;
+        const Eigen::Vector2d new_vel = smoothed_vel_;
+
+        {
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            current_pos_ = pos;
+            current_vel_ = new_vel;
+            current_yaw_ = yaw;
+            has_odom_ = true;
+        }
+
+        has_velocity_estimate_ = true;
+        last_odom_pos_ = pos;
+        last_odom_stamp_ = stamp;
+        has_last_odom_ = true;
+    }
+
+    static double yawFromQuaternion(const geometry_msgs::msg::Quaternion &q)
+    {
+        double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+        double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+        return std::atan2(siny_cosp, cosy_cosp);
+    }
+
+    static Eigen::Vector2d twistToOdomVelocity(const nav_msgs::msg::Odometry::SharedPtr &msg, double yaw)
+    {
+        Eigen::Vector2d vel_body(msg->twist.twist.linear.x, msg->twist.twist.linear.y);
+        double cy = std::cos(yaw), sy = std::sin(yaw);
+        return Eigen::Vector2d(
+            cy * vel_body(0) - sy * vel_body(1),
+            sy * vel_body(0) + cy * vel_body(1));
+    }
+
+    static bool isFinite(const Eigen::Vector2d &v)
+    {
+        return std::isfinite(v(0)) && std::isfinite(v(1));
+    }
+
     void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
-        if (!has_odom_) { RCLCPP_WARN(this->get_logger(), "No odom yet"); return; }
-        final_goal_ = Eigen::Vector2d(msg->pose.position.x, msg->pose.position.y);
-        has_final_goal_ = true;
-        planToGoal(final_goal_);
+        Eigen::Vector2d goal(msg->pose.position.x, msg->pose.position.y);
+        bool has_odom;
+        {
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            has_odom = has_odom_;
+            if (has_odom)
+            {
+                final_goal_ = goal;
+                has_final_goal_ = true;
+            }
+        }
+        if (!has_odom) { RCLCPP_WARN(this->get_logger(), "No odom yet"); return; }
+        planToGoal(goal);
     }
 
     void planToGoal(Eigen::Vector2d goal_pt)
     {
-        Eigen::Vector2d diff = goal_pt - current_pos_;
+        Eigen::Vector2d cur_pos, cur_vel;
+        {
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            cur_pos = current_pos_;
+            cur_vel = current_vel_;
+        }
+
+        Eigen::Vector2d diff = goal_pt - cur_pos;
         // A* near_end tolerance = ceil(1/resolution_astar) * resolution_astar ≈ 1.0m
         // 不要在这个范围内重规划，让最后一段轨迹自然执行完
         if (diff.norm() < 1.0) return;
@@ -166,7 +265,7 @@ private:
         this->get_parameter("sdf_map.local_update_range_x", local_range);
         local_range -= 0.5;
         if (diff.norm() > local_range)
-            goal_pt = current_pos_ + diff.normalized() * local_range;
+            goal_pt = cur_pos + diff.normalized() * local_range;
 
         Eigen::Vector2d map_origin, map_size;
         sdf_map_->getRegion(map_origin, map_size);
@@ -175,7 +274,7 @@ private:
 
         // A*
         kino_astar_->reset();
-        int result = kino_astar_->search(current_pos_, current_vel_, Eigen::Vector2d::Zero(),
+        int result = kino_astar_->search(cur_pos, cur_vel, Eigen::Vector2d::Zero(),
                                           goal_pt, Eigen::Vector2d::Zero(), true);
         if (result == KinodynamicAstar::NO_PATH) {
             std::lock_guard<std::mutex> lk(traj_mutex_);
@@ -197,7 +296,7 @@ private:
         this->get_parameter("search.max_vel", max_vel);
         this->get_parameter("search.max_acc", max_acc);
 
-        Eigen::Vector2d sv = start_end_derivatives.size() >= 2 ? start_end_derivatives[0] : current_vel_;
+        Eigen::Vector2d sv = start_end_derivatives.size() >= 2 ? start_end_derivatives[0] : cur_vel;
         Eigen::Vector2d ev = start_end_derivatives.size() >= 2 ? start_end_derivatives[1] : Eigen::Vector2d::Zero();
         Eigen::Vector2d sa = start_end_derivatives.size() >= 4 ? start_end_derivatives[2] : Eigen::Vector2d::Zero();
         Eigen::Vector2d ea = start_end_derivatives.size() >= 4 ? start_end_derivatives[3] : Eigen::Vector2d::Zero();
@@ -228,14 +327,24 @@ private:
 
     void replanCallback()
     {
-        if (!has_odom_ || !has_final_goal_) return;
-        if ((final_goal_ - current_pos_).norm() < 1.0) return;
+        Eigen::Vector2d goal, cur_pos;
+        bool has_odom, has_goal;
+        {
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            has_odom = has_odom_;
+            has_goal = has_final_goal_;
+            goal     = final_goal_;
+            cur_pos  = current_pos_;
+        }
 
-        Eigen::Vector2d local_goal = final_goal_;
+        if (!has_odom || !has_goal) return;
+        if ((goal - cur_pos).norm() < 1.0) return;
+
+        Eigen::Vector2d local_goal = goal;
         if (has_global_path_ && !global_waypoints_.empty())
         {
             while (current_waypoint_idx_ < (int)global_waypoints_.size() - 1 &&
-                   (global_waypoints_[current_waypoint_idx_] - current_pos_).norm() < 1.0)
+                   (global_waypoints_[current_waypoint_idx_] - cur_pos).norm() < 1.0)
                 current_waypoint_idx_++;
             local_goal = global_waypoints_[current_waypoint_idx_];
         }
@@ -244,7 +353,22 @@ private:
 
     void controlLoop()
     {
-        if (!has_odom_) return;
+        // Snapshot INPUT state under state_mutex_ (shared across callback groups);
+        // do all subsequent work on these locals. state_mutex_ is released before
+        // traj_mutex_ is ever taken below — the two are never held together.
+        Eigen::Vector2d cur_pos, cur_vel, goal;
+        double cur_yaw = 0.0;
+        bool has_odom = false, has_goal = false;
+        {
+            std::lock_guard<std::mutex> lk(state_mutex_);
+            has_odom = has_odom_;
+            cur_pos  = current_pos_;
+            cur_vel  = current_vel_;
+            cur_yaw  = current_yaw_;
+            goal     = final_goal_;
+            has_goal = has_final_goal_;
+        }
+        if (!has_odom) return;
 
         // Snapshot trajectory state under lock; do all subsequent work on the
         // local copies so a replan mid-control-cycle can't tear the state.
@@ -269,15 +393,16 @@ private:
                 has_traj_ = false;
             }
             has = false;
-            if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 1.0) {
+            if (!has_goal || (goal - cur_pos).norm() < 1.0) {
                 RCLCPP_INFO(this->get_logger(), "Goal reached!");
+                std::lock_guard<std::mutex> lk(state_mutex_);
                 has_final_goal_ = false;
             }
         }
 
         static const sentry_planner::MincoTrajectory empty_traj;
         const auto &traj_ref = (has && snap) ? *snap : empty_traj;
-        auto cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
+        auto cmd = tracker_.compute(cur_pos, cur_vel, cur_yaw,
                                      traj_ref, elapsed, has && snap);
         cmd_vel_pub_->publish(cmd);
     }
@@ -334,6 +459,16 @@ private:
     Eigen::Vector2d current_vel_ = Eigen::Vector2d::Zero();
     double current_yaw_ = 0.0;
     bool has_odom_ = false;
+    bool has_velocity_estimate_ = false;
+    Eigen::Vector2d smoothed_vel_ = Eigen::Vector2d::Zero();  // control-group-local velocity accumulator
+    Eigen::Vector2d last_odom_pos_ = Eigen::Vector2d::Zero();
+    rclcpp::Time last_odom_stamp_;
+    bool has_last_odom_ = false;
+
+    // Guards INPUT state shared across callback groups: current_pos_, current_vel_,
+    // current_yaw_, has_odom_, final_goal_, has_final_goal_. Never held together
+    // with traj_mutex_ (no nesting; snapshot-then-release everywhere).
+    mutable std::mutex state_mutex_;
 
     // Trajectory state shared between replan (writer) and control (reader).
     // All four fields below are guarded by traj_mutex_.
@@ -358,6 +493,7 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::TimerBase::SharedPtr ctrl_timer_, replan_timer_;
+    rclcpp::CallbackGroup::SharedPtr control_cb_group_;
 };
 
 int main(int argc, char **argv)
@@ -365,7 +501,9 @@ int main(int argc, char **argv)
     rclcpp::init(argc, argv);
     auto node = std::make_shared<SentryLocalPlannerNode>();
     node->initialize();
-    rclcpp::spin(node);
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
     rclcpp::shutdown();
     return 0;
 }
