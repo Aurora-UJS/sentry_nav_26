@@ -48,14 +48,6 @@ namespace fast_planner
         check_num_ = node_->declare_parameter<int>("search.check_num", 50);
         robot_radius_ = node_->declare_parameter<double>("search.robot_radius", 0.3);
         tie_breaker_ = 1.0 + 1.0 / 10000;
-
-        // 预计算 footprint 采样点偏移: 中心 + 上下左右 4 个点
-        footprint_offsets_.clear();
-        footprint_offsets_.push_back(Eigen::Vector2d(0, 0));
-        footprint_offsets_.push_back(Eigen::Vector2d( robot_radius_, 0));
-        footprint_offsets_.push_back(Eigen::Vector2d(-robot_radius_, 0));
-        footprint_offsets_.push_back(Eigen::Vector2d(0,  robot_radius_));
-        footprint_offsets_.push_back(Eigen::Vector2d(0, -robot_radius_));
     }
     int KinodynamicAstar::search(Eigen::Vector2d start_pt, Eigen::Vector2d start_v, Eigen::Vector2d start_a,
                                  Eigen::Vector2d end_pt, Eigen::Vector2d end_v, bool init, bool dynamic, double time_start)
@@ -235,18 +227,10 @@ namespace fast_planner
                         double dt = tau * double(k) / double(check_num_);
                         stateTransit(cur_state, xt, um, dt);
                         pos = xt.head(2);
-                        bool fp_occ = false;
-                        for (const auto &offset : footprint_offsets_)
-                        {
-                            Eigen::Vector2d fp = pos + offset;
-                            if (env_->getInflateOccupancy(fp) == 1 ||
-                                !env_->isInMap(fp))
-                            {
-                                fp_occ = true;
-                                break;
-                            }
-                        }
-                        if (fp_occ)
+                        // DISC collision test: exact, O(1) and inherently
+                        // diagonal-safe. Collides iff center is out of map OR
+                        // ESDF distance at center < robot_radius_.
+                        if (!env_->isInMap(pos) || env_->getDistance(pos) < robot_radius_)
                         {
                             is_occ = true;
                             break;
@@ -440,13 +424,9 @@ namespace fast_planner
             // if (edt_environment_->evaluateCoarseEDT(coord, -1.0) <= margin_) {
             //   return false;
             // }
-            for (const auto &offset : footprint_offsets_)
-            {
-                Eigen::Vector2d fp = coord + offset;
-                if (env_->getInflateOccupancy(fp) == 1 ||
-                    !env_->isInMap(fp))
-                    return false;
-            }
+            // DISC collision test: exact, O(1) and inherently diagonal-safe.
+            if (!env_->isInMap(coord) || env_->getDistance(coord) < robot_radius_)
+                return false;
         }
         coef_shot_ = coef;
         t_shot_ = t_d;
