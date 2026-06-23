@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <sentry_global_planner/global_map.hpp>
+#include <plan_env/traversability_layer.hpp>
 
 namespace sentry_global
 {
@@ -16,12 +17,17 @@ class JPSSearcher
 {
 public:
     void setMap(const MapInterface *map) { map_ = map; }
-    void setParams(double esdf_weight, double safety_dist, double waypoint_spacing)
+    void setParams(double esdf_weight, double safety_dist, double waypoint_spacing,
+                   double oneway_penalty = 50.0)
     {
         esdf_weight_ = esdf_weight;
         safety_dist_ = safety_dist;
         waypoint_spacing_ = waypoint_spacing;
+        oneway_penalty_ = oneway_penalty;
     }
+
+    // 可通行性标注层 (可选, 外部持有生命周期; 空指针 → 行为与原先完全一致)
+    void setTravLayer(const sentry_nav::TraversabilityLayer *t) { trav_ = t; }
 
     bool search(const Eigen::Vector2d &start_pos, const Eigen::Vector2d &goal_pos,
                 std::vector<Eigen::Vector2d> &path)
@@ -79,6 +85,27 @@ public:
                 if (esdf_val < safety_dist_ * 3.0 && esdf_val > 0)
                     cost_mult += esdf_weight_ / (esdf_val + 0.1);
 
+                // 可通行性标注层 ONEWAY 软门控: cur→successor 这一段若逆着单向箭头
+                // 穿过 oneway 区, 则放大代价 (软约束, 绝不硬跳过, 以保持 JPS 完整/连通;
+                // 硬性方向约束由局部规划器 A*/MINCO 执行)。沿段采样若干点判定。
+                if (trav_ && trav_->enabled())
+                {
+                    Eigen::Vector2d wc = map_->gridToWorld(cx, cy);
+                    Eigen::Vector2d wn = map_->gridToWorld(nx, ny);
+                    Eigen::Vector2d travel = wn - wc;  // 世界系行进方向 (长度无关, 层内归一化)
+                    const int n_sample = 5;
+                    for (int si = 0; si <= n_sample; ++si)
+                    {
+                        double t = (double)si / (double)n_sample;
+                        Eigen::Vector2d pt = wc + t * travel;
+                        if (!trav_->isDirectionAllowed(pt, travel))
+                        {
+                            cost_mult += oneway_penalty_;
+                            break;
+                        }
+                    }
+                }
+
                 double new_g = g_score_[cur.id] + step * cost_mult;
                 if (!g_score_.count(nid) || new_g < g_score_[nid])
                 {
@@ -94,9 +121,11 @@ public:
 
 private:
     const MapInterface *map_ = nullptr;
+    const sentry_nav::TraversabilityLayer *trav_ = nullptr;  // 可选标注层 (外部持有生命周期)
     double esdf_weight_ = 2.0;
     double safety_dist_ = 0.3;
     double waypoint_spacing_ = 1.0;
+    double oneway_penalty_ = 50.0;  // ONEWAY 逆向软惩罚: cost_mult 增量
 
     struct OpenNode {
         int id;
@@ -122,6 +151,10 @@ private:
         if (!map_->isInMap(x, y)) return false;
         if (map_->isOccupied(x, y)) return false;
         if (map_->getESDF(x, y) < safety_dist_) return false;
+        // 可通行性标注层 OBSTACLE 叠加: 人工补充障碍 (标注只能"增加"障碍, 不放宽既有判定)
+        if (trav_ && trav_->enabled() &&
+            trav_->getType(map_->gridToWorld(x, y)) == sentry_nav::TravType::OBSTACLE)
+            return false;
         return true;
     }
 
