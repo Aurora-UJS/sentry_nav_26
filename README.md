@@ -12,7 +12,8 @@
 - **局部规划**：Kinodynamic A* + 多项式 Shot 直达（`path_searching`）
 - **轨迹优化**：MINCO 五次多项式 + L-BFGS（NLopt），平滑/避障/可行性多目标
 - **轨迹跟踪**：50 Hz LDLT-MPC（10 步预测 horizon），独立 yaw 控制器（窄道对齐 / 开阔旋转）
-- **仿真环境**：RMUC 2025 赛场（[`rm_sim_26`](https://github.com/Neomelt/rm_sim_26)）+ Livox 雷达 / IMU 桥接
+- **脱困恢复**：局部规划器内置状态机 reroute 角度扇 → ESDF 梯度后退 → 原地转向 → SAFE_IDLE
+- **仿真环境**：RMUC 2025 赛场（[`rm_sim_26`](https://github.com/Neomelt/rm_sim_26)）+ Livox 雷达 / IMU 桥接；支持 RGL（NVIDIA GPU 高精度 Mid360）与内置 `gpu_lidar` 双模式（`lidar_mode`）
 - **中间件**：推荐 `rmw_zenoh_cpp`，大点云吞吐与多机场景表现优于 DDS
 
 ---
@@ -296,8 +297,9 @@ ros2 launch sentry_global_planner global_planner.launch.py \
 
 ```bash
 source install/setup.zsh
+# 仿真用 mid360.yaml（config/ 仅有 mid360.yaml 与 unilidar_l2.yaml）
 timeout 15 ros2 run small_point_lio small_point_lio_node \
-    --ros-args --params-file install/small_point_lio/share/small_point_lio/config/simulation.yaml
+    --ros-args --params-file install/small_point_lio/share/small_point_lio/config/mid360.yaml
 ```
 
 ---
@@ -312,14 +314,15 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 | `replan.frequency` | 2 Hz | 轨迹重规划频率 |
 | `mpc.horizon` | 10 | 预测步数（horizon = N · dt = 0.2s）|
 | `mpc.q_pos / q_vel / r_acc` | 10 / 1 / 0.1 | MPC 状态/输入权重 |
-| `minco_opt.max_time_s` | 0.02 | L-BFGS 总预算（粗 40% / 精 60%）|
+| `minco_opt.max_time_ms` | 20.0 | L-BFGS 总预算 (ms)，节点内 /1000（粗 40% / 精 60% → 8ms / 12ms）|
+| `minco_opt.dist0` / `dist0_vel_k` | 0.05 / 0.0 | footprint ESDF 安全阈值 + 速度相关裕度（dist0_eff = dist0 + k·\|v\|，默认 0=关闭）|
 | `search.max_vel / max_acc` | — | 动力学搜索的速度/加速度上限 |
 
 ### 全局规划器（`sentry_global_planner/config/global_planner_params.yaml`）
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `global_map.mode` | `prior` | `prior` = 加载 PGM；`online` = 用 plan_env 实时 ESDF（**未完成**） |
+| `global_map.mode` | `prior` | `prior` = 加载 PGM；`online` = 用 plan_env 实时 ESDF（**已接入 JPS，待端到端验证**） |
 | `jps.safety_dist` | 0.3 m | ESDF 小于此值视为不可通行 |
 | `jps.esdf_weight` | 2.0 | ESDF 代价权重，越大越远离障碍 |
 | `jps.waypoint_spacing` | 1.0 m | 简化后路径点最小间距 |
@@ -329,10 +332,36 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `sdf_map.resolusion_` | 0.05 m | 体素分辨率（**注意 yaml 里键名拼写**）|
-| `sdf_map.local_update_range_x/y` | 3.0 m | 局部窗口半径 |
-| `sdf_map.obstacles_inflation` | 视 yaml | 膨胀半径 |
-| `sdf_map.max_slope_deg` | 17° | 高程坡度阈值 |
+| `sdf_map.local_update_range_x/y` | 8.0 m | 局部窗口半径（planner_params.yaml 注入值；代码 declare 默认 3.0）|
+| `sdf_map.obstacles_inflation` | 0.05 m | 膨胀半径（代码 declare 默认 0.0009）|
+| `sdf_map.max_slope_deg` | 17° | 高程坡度阈值（超阈值写入 occupancy）|
+| `sdf_map.step_height_max` | 0.08 m | 可通行台阶高度（超阈值写入 occupancy）|
+| `sdf_map.cloud_min/max_height` | -0.2 / 0.8 m | 相对车体 z 的点云高度窗口 |
 | `sdf_map.logodds_*` | hit 0.85 / miss -0.4 | 贝叶斯更新参数 |
+
+---
+
+## 可通行性标注层（方向性 / 单向）
+
+先验 PGM 与在线占用图都是「无方向」的双态地图——能走就双向都能走。但雷达架设较高，扫不到台阶**立面**，会把「只能下不能上」的台阶当成双向平地。**可通行性标注层**离线补一张与地图同坐标系的 `*.trav.yaml`，给规划器引入第三态：
+
+| 类型 | 含义 |
+|---|---|
+| `free` | 普通可通行（无约束）|
+| `obstacle` | 人工补充障碍（双向禁止，补感知盲区）|
+| `oneway` | 单向可通行（带允许行进朝向 `direction_deg` + 容差锥 `tolerance_deg`）|
+
+- **帧约定**：世界/odom 系、米，origin 取 `rmuc_2025.yaml` 的 origin；规划器起点 = 地图原点，故**无需额外 TF**。
+- **方向语义**：`direction_deg` = 允许行进航向 `atan2(dy,dx)` 度数；放行 ⇔ `dot(unit(travel), dir) >= cos(tolerance_deg)`；默认 `90°`（cos=0）= 前向半球，逆向被挡。
+- **各层 gate**：全局 JPS = **软方向代价 + obstacle 叠加**（不硬挡 oneway，保持全局图连通完整）；局部 Kinodynamic A* + MINCO = **硬方向约束**（基于边，逆向直接剪除）。
+- **OPT-IN，默认关**：出厂 `rmuc_2025.trav.yaml` 为 `regions: []` → `loadFromYaml()` 返回 false → 本层 disabled → 行为与今天完全一致。仅当指向含有效 region 的 yaml 时才生效：
+
+```bash
+ros2 launch sentry_bringup bringup.launch.py \
+    trav_yaml:=$HOME/sentry_nav_26/install/sentry_bringup/share/sentry_bringup/map/rmuc_2025.trav.yaml
+```
+
+> 标注用 RViz `Publish Point`（`/clicked_point` 回读坐标）手编 yaml，或用 `sentry_trav_rviz_plugin` 可视化绘制导出。完整数据模型、格式、gate 机制与已知限制见 **[docs/TRAVERSABILITY.md](docs/TRAVERSABILITY.md)**。
 
 ---
 
@@ -342,20 +371,22 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 |---|---|---|
 | LIO 定位 | ✅ | 通过 submodule |
 | 在线 2D occupancy + ESDF | ✅ | log-odds + Felzenszwalb |
-| 高程图 / 坡度估计 | 🟡 | `elevation_buffer_` 已建，坡度只用于点云过滤，未进入代价 |
+| 高程图 / 坡度估计 | 🟡 | `elevation_buffer_` + 邻域坡度/台阶检测已实现，超阈值会膨胀写入 occupancy log-odds（**进入代价**，sensor_processor.cpp Pass 2）；高位雷达下地面点稀疏，特征常处于数据饥饿 |
 | 多层占用（狗洞净空检测）| ❌ | 未实现 |
 | 时间衰减体素 (STVL) | ❌ | log-odds 永久累积，无衰减 |
 | 视锥清除 | ❌ | 未实现 |
 | 可通行性融合层 | ❌ | 未实现 |
+| 可通行性标注层（单向/方向）| 🟡 | 静态离线标注；OPT-IN 默认关（`regions: []` 即 disabled）；全局软代价 + 局部 A*/MINCO 硬约束；详见 `docs/TRAVERSABILITY.md` |
 | 全局规划 (JPS, 静态先验) | ✅ | 完整可用 |
-| 全局规划在线模式 | ❌ | `OnlineMapProxy` 已搭好，未接通 |
-| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot |
-| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS |
-| MPC 跟踪 | ✅ | LDLT，软约束 |
+| 全局规划在线模式 | 🟡 | `OnlineMapProxy` 已接入 JPS（global_planner_node.cpp `online` 分支：建 SDFMap → proxy → `jps_.setMap`），但未端到端验证；按当前 launch 配置直接启用会因缺 `sdf_map.*` 参数令 SDFMap 抛异常崩溃，需先补全参数接线，且为局部窗口/odom 系，不适合替代 prior 做全局 |
+| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF disc 碰撞检测（getDistance < robot_radius）|
+| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS；12 点 footprint + Lipschitz 剪枝 |
+| MPC 跟踪 | ✅ | LDLT，软约束；常量矩阵 + 分解 buildModel() 一次构建 |
+| 脱困恢复 FSM | ✅ | reroute 扇 → ESDF 后退 → 旋转 → SAFE_IDLE（sentry_local_planner_node.cpp）|
 | RMUC 仿真 | ✅ | submodule 提供 |
 | 真车适配 | 🟡 | 需替换 LIO 输入话题 + map→odom 全局定位 |
 
-详细的 bug 与改进项见仓外审计文档（不入版本控制）。
+详细的 bug 与改进项见 `docs/REVIEW.md`（代码审计报告）。
 
 ---
 
@@ -363,7 +394,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 
 ### 短期（修 bug + 接缝）
 
-- 在线建图模式接入全局规划器（完成 `OnlineMapProxy`）
+- 端到端验证在线建图模式（`OnlineMapProxy` 已接入 JPS，待跑通 + 调参）
 - 重规划频率从 2Hz 提到 ~10Hz（多线程 executor 已就位，需验证不引入低速起步抖动）
 
 ### 中期（功能完整化）
@@ -388,7 +419,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 - 点云密度过大会拖慢 ESDF（20 Hz timer），可在 LIO 输出端做下采样
 - Zenoh 模式下若发现节点互相发现不到，先确认 `rmw_zenohd` router 已启动
 - 若 RViz 看到 `/sdf_map/esdf` 不连续：通常是滑窗边界，正常现象
-- 真车上线前：删除 `bringup.launch.py` 里的静态 `map→odom` TF，接入 AMCL 或视觉定位
+- 真车上线前：删除 `sim_test.launch.py` 里的静态 `map→odom` TF（bringup 经 sim_test 引入），接入 AMCL 或视觉定位
 - 若局部规划器 NaN 崩溃：通常是 `solveQuintic` 输入 waypoints 过于贴近，检查 A* 输出去重
 
 ---

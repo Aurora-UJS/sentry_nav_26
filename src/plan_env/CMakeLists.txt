@@ -7,6 +7,7 @@ endif()
 SET(CMAKE_BUILD_TYPE "RelWithDebInfo")
 # SET(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb")
 find_package(ament_cmake_auto REQUIRED)
+find_package(yaml-cpp REQUIRED)
 # find dependencies
 ament_auto_find_build_dependencies()
 ###########
@@ -14,8 +15,11 @@ ament_auto_find_build_dependencies()
 ###########
 
 ament_auto_add_library(${PROJECT_NAME} SHARED
-  DIRECTORY src 
+  DIRECTORY src
 )
+
+# yaml-cpp 非 ament 包, 需显式链接 (TraversabilityLayer 解析 .trav.yaml)
+target_link_libraries(${PROJECT_NAME} yaml-cpp)
 
 
 if(BUILD_TESTING)

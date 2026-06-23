@@ -9,3 +9,6 @@ sentry_global_planner:
       esdf_weight: 2.0            # ESDF 代价权重: 越大路径越远离障碍
       safety_dist: 0.3            # ESDF < 此值视为不可通行
       waypoint_spacing: 1.0       # 简化后 waypoint 最小间距 (m)
+      oneway_penalty: 50.0        # ONEWAY 逆向软惩罚: 代价乘子增量 (软门控, 绝不硬挡)
+    traversability:
+      yaml_path: ""               # 可通行性标注 .trav.yaml 绝对路径; 空=禁用 (由 launch 注入)

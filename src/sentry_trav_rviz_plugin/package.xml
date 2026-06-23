@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+    <name>sentry_trav_rviz_plugin</name>
+    <version>0.0.0</version>
+    <description>
+        RViz2 (Jazzy) 插件: 在 3D 视图里手工绘制 free / obstacle / oneway 区域,
+        实时预览 MarkerArray, 读写 plan_env 约定的 .trav.yaml 可通行性标注。
+    </description>
+    <maintainer email="kibriyamirah5342@gmail.com">neomelt</maintainer>
+    <license>TODO: License declaration</license>
+
+    <buildtool_depend>ament_cmake</buildtool_depend>
+
+    <depend>rviz_common</depend>
+    <depend>rviz_rendering</depend>
+    <depend>rviz_default_plugins</depend>
+    <depend>pluginlib</depend>
+    <depend>geometry_msgs</depend>
+    <depend>visualization_msgs</depend>
+    <depend>rclcpp</depend>
+    <depend>qtbase5-dev</depend>
+    <depend>yaml-cpp</depend>
+
+    <test_depend>ament_lint_auto</test_depend>
+    <test_depend>ament_lint_common</test_depend>
+
+    <export>
+        <build_type>ament_cmake</build_type>
+        <!-- 插件资源由 CMake 的 pluginlib_export_plugin_description_file 注册到
+             ament 资源索引, 无需在此再写 <rviz_common plugin=...> (会重复注册) -->
+    </export>
+</package>

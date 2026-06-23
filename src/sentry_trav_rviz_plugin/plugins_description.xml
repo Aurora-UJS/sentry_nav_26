@@ -1,0 +1,27 @@
+<library path="sentry_trav_rviz_plugin">
+
+  <!-- 标注面板: 类型/方向/容差选择 + 区域列表 + 读写 .trav.yaml + MarkerArray 预览 -->
+  <class
+    name="sentry_trav_rviz_plugin/TraversabilityPanel"
+    type="sentry_trav_rviz_plugin::TraversabilityPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      绘制 free / obstacle / oneway 可通行性标注区域, 实时预览并读写
+      plan_env 约定的 .trav.yaml。配合 "Traversability Annotate" 工具
+      (或内置 Publish Point 工具) 在 3D 视图里点取多边形顶点。
+    </description>
+  </class>
+
+  <!-- 标注工具: 左键在地面 (z=0) 取点, 右键/Esc 结束多边形, Backspace 撤销 -->
+  <class
+    name="sentry_trav_rviz_plugin/TraversabilityTool"
+    type="sentry_trav_rviz_plugin::TraversabilityTool"
+    base_class_type="rviz_common::Tool">
+    <description>
+      左键点击 3D 视图, 把点投影到地面 (z=0) 并追加到当前进行中的多边形;
+      右键或 Esc 结束多边形, Backspace 撤销上一个点。配合 Traversability
+      面板使用。
+    </description>
+  </class>
+
+</library>

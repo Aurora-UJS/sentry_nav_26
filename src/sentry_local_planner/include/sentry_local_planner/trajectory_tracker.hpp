@@ -52,11 +52,15 @@ public:
         const Eigen::Vector2d &pos, const Eigen::Vector2d &vel, double yaw,
         const MincoTrajectory &traj, double elapsed, bool has_traj);
 
+    // Rate/accel-limited yaw command. Exposed so the planner node's recovery
+    // ROTATE branch can emit an in-place spin through the same limiter the
+    // tracker uses internally (no behavioral change to the tracker).
+    double limitYawRate(double target_yaw_rate);
+
 private:
     double computeAngularVelocity(
         const Eigen::Vector2d &pos, double yaw,
         const MincoTrajectory &traj, double elapsed);
-    double limitYawRate(double target_yaw_rate);
 
     Config cfg_;
     MPCController mpc_;

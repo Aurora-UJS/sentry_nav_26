@@ -8,6 +8,7 @@
 #include "plan_env/sdf_map.hpp"
 #include "plan_env/obj_predictor.hpp"
 #include "plan_env/environment_interface.hpp"
+#include "plan_env/traversability_layer.hpp"
 
 namespace fast_planner
 {
@@ -28,8 +29,21 @@ namespace fast_planner
         {
         }
         SDFMap::Ptr sdf_map_;
+        sentry_nav::TraversabilityLayer::Ptr trav_layer_;  // 可选静态标注层 (nullptr=未挂载)
         void init();
         void setMap(SDFMap::Ptr map);
+        // 加载静态可通行性标注 (失败则保持未挂载, 查询全部放行)。返回是否成功。
+        bool loadTraversability(const std::string &yaml_path)
+        {
+            auto layer = std::make_shared<sentry_nav::TraversabilityLayer>();
+            if (layer->loadFromYaml(yaml_path) && layer->enabled())
+            {
+                trav_layer_ = layer;
+                return true;
+            }
+            return false;
+        }
+        sentry_nav::TraversabilityLayer::Ptr getTraversability() const { return trav_layer_; }
         void setObjPrediction(ObjPrediction prediction);
         void setObjScale(ObjScale scale);
         void getSurroundDistance(Eigen::Vector2d pts[2][2], double dists[2][2]);
@@ -69,6 +83,23 @@ namespace fast_planner
         }
         // evaluateCoarseEDT override with const ref
         double evaluateCoarseEDT(const Eigen::Vector2d &pos, double time) override;
+
+        // --- 可通行性标注层查询 (delegate to trav_layer_, nullptr-safe) ---
+        int getTravType(const Eigen::Vector2d &pos) override
+        {
+            return trav_layer_ ? (int)trav_layer_->getType(pos) : 0;
+        }
+        bool isDirectionAllowed(const Eigen::Vector2d &pos, const Eigen::Vector2d &travel_dir) override
+        {
+            return trav_layer_ ? trav_layer_->isDirectionAllowed(pos, travel_dir) : true;
+        }
+        bool getOnewayConstraint(const Eigen::Vector2d &pos, Eigen::Vector2d &dir, double &cos_tol) override
+        {
+            if (trav_layer_) return trav_layer_->getOnewayConstraint(pos, dir, cos_tol);
+            dir.setZero();
+            cos_tol = -1.0;
+            return false;
+        }
 
         typedef shared_ptr<EDTEnvironment> Ptr;
     };
