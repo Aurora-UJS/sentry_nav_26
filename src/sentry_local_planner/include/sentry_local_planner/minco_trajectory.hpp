@@ -51,7 +51,8 @@ public:
                       double lambda_smooth, double lambda_col, double lambda_feas,
                       double dist0, double dist0_vel_k, double max_vel, double max_acc,
                       double robot_radius = 0.3,
-                      int num_samples = 8, int max_iter = 200, double max_time_s = 0.02);
+                      int num_samples = 8, int max_iter = 200, double max_time_s = 0.02,
+                      double lambda_oneway = 8.0);
 
     void setup(const std::vector<Eigen::Vector2d> &waypoints,
                const Eigen::Vector2d &start_vel, const Eigen::Vector2d &start_acc,
@@ -79,6 +80,7 @@ private:
     sentry_nav::EnvironmentInterface* edt_env_ = nullptr;
     double lambda_smooth_ = 1.0;
     double lambda_col_    = 8.0;
+    double lambda_oneway_ = 8.0;   // 单向区软方向代价权重 (偏出允许锥的速度方向受罚)
     double lambda_feas_   = 0.001;
     double dist0_         = 0.5;
     double dist0_vel_k_   = 0.0;   // 速度相关裕度系数: dist0_eff = dist0 + dist0_vel_k*|v|; 0=关闭
@@ -94,6 +96,9 @@ private:
     std::vector<double> best_var_;
     double min_cost_ = 1e18;
     bool coarse_stage_ = false;
+    // 单向区软代价的瞬时累加器: 在 calcCollisionCost 的逐采样循环里复用 pos/vel
+    // 顺带累计 (未加权), 由 computeCostAndGrad 乘 lambda_oneway_ 并入总代价。
+    double oneway_cost_ = 0.0;
 
     void runOptimization(const std::vector<Eigen::Vector2d> &waypoints);
     static double nloptCallback(const std::vector<double> &x,

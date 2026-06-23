@@ -8,11 +8,13 @@ namespace sentry_planner
 void MincoTrajectory::setOptimizer(sentry_nav::EnvironmentInterface* env,
                                    double lambda_smooth, double lambda_col, double lambda_feas,
                                    double dist0, double dist0_vel_k, double max_vel, double max_acc,
-                                   double robot_radius, int num_samples, int max_iter, double max_time_s)
+                                   double robot_radius, int num_samples, int max_iter, double max_time_s,
+                                   double lambda_oneway)
 {
     edt_env_       = env;
     lambda_smooth_ = lambda_smooth;
     lambda_col_    = lambda_col;
+    lambda_oneway_ = lambda_oneway;
     lambda_feas_   = lambda_feas;
     dist0_         = dist0;
     dist0_vel_k_   = dist0_vel_k;
@@ -191,6 +193,9 @@ double MincoTrajectory::computeCostAndGrad(const std::vector<double> &x, std::ve
     double cost = 0.0;
     cost += lambda_smooth_ * calcSmoothCost(grad);
     cost += lambda_col_    * calcCollisionCost(grad);
+    // 单向区软方向代价: calcCollisionCost 在逐采样循环里顺带累计了 oneway_cost_
+    // (未加权), 这里独立按 lambda_oneway_ 加权并入总代价; 未挂载标注层时恒为 0。
+    cost += lambda_oneway_ * oneway_cost_;
     cost += lambda_feas_   * calcFeasibilityCost(grad);
 
     if (cost < min_cost_)
@@ -299,6 +304,8 @@ double MincoTrajectory::calcCollisionCost(std::vector<double> &grad_x)
     int N = (int)segments_.size();
     int M = N - 1;
 
+    oneway_cost_ = 0.0;   // 单向区软代价瞬时累加器, 每次评估清零
+
     double t_elapsed = 0.0;
 
     for (int i = 0; i < N; ++i)
@@ -312,6 +319,32 @@ double MincoTrajectory::calcCollisionCost(std::vector<double> &grad_x)
         {
             double tau = (k + 0.5) * dt;
             Eigen::Vector2d pos = segments_[i].pos(tau);
+
+            // 单向区软方向代价: 若该采样点落在 oneway 格内, 且段速度方向偏出允许锥
+            // (dot(v_hat, dir) < cos_tol), 累计 (cos_tol - dot)^2, 让 line-search / best_var_
+            // 倾向不把轨迹抹回逆向。仅计代价、不反传速度梯度 (速度对控制点的解析梯度复杂,
+            // A* 种子已满足方向, MINCO 只需别破坏)。零长速度→放行。必须放在下方 Lipschitz
+            // 剪枝 continue 之前: 单向区可能远离障碍, 否则会被跳过。未挂载标注层时
+            // getOnewayConstraint 恒返回 false → 零代价 → 行为与未启用完全一致。
+            if (edt_env_ != nullptr)
+            {
+                Eigen::Vector2d ow_dir;
+                double ow_cos_tol;
+                if (edt_env_->getOnewayConstraint(pos, ow_dir, ow_cos_tol))
+                {
+                    Eigen::Vector2d v = segments_[i].vel(tau);
+                    double vn = v.norm();
+                    if (vn > 1e-6)
+                    {
+                        double dot = v.dot(ow_dir) / vn;   // ow_dir 已是单位向量
+                        if (dot < ow_cos_tol)
+                        {
+                            double pd = ow_cos_tol - dot;
+                            oneway_cost_ += pd * pd;
+                        }
+                    }
+                }
+            }
 
             // Velocity-dependent safety margin (#7): demand more clearance the
             // faster we move (absorbs LIO jitter + control latency / braking

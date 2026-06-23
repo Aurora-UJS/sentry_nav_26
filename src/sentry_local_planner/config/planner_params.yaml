@@ -99,6 +99,7 @@ sentry_local_planner:
     minco_opt:
       lambda_smooth: 0.1           # 平滑权重 (MINCO 天然平滑，比 bspline 小)
       lambda_col: 8.0              # 碰撞代价权重 (与 bspline 对齐)
+      lambda_oneway: 8.0           # 单向区软方向代价权重：采样点落在 oneway 格且速度偏出允许锥时按 (cos_tol-dot)^2 受罚 (软约束，不硬挡)
       lambda_feas: 0.001           # 动力学可行性惩罚
       robot_radius: 0.3            # 车体半径，用于 footprint 碰撞检测
       dist0: 0.05                  # ESDF 安全阈值：footprint 点距墙小于此值才产生代价（小值，安全由 robot_radius 保证）
@@ -106,6 +107,10 @@ sentry_local_planner:
       num_samples: 8               # 每段采样点数
       max_iter: 200                # L-BFGS 最大迭代次数
       max_time_ms: 20.0            # 最大优化时间 (ms)
+
+    # --- 静态可通行性标注层 (free/obstacle/oneway) ---
+    traversability:
+      yaml_path: ""                # opt-in：默认空=禁用(行为与未启用完全一致)；路径通常由 launch 注入(指向 sentry_bringup 随包安装的 .trav.yaml)
 
     # --- 脱困恢复参数 ("走不通就换一条路径": reroute 扇 → ESDF 后退 → 原地转) ---
     recovery:

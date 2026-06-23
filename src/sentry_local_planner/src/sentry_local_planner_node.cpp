@@ -52,6 +52,20 @@ public:
         edt_env_ = std::make_shared<EDTEnvironment>();
         edt_env_->setMap(sdf_map_);
 
+        // --- 静态可通行性标注层 (free/obstacle/oneway) ---
+        // opt-in: 路径通常由 launch 注入。空路径 → 不挂载 → 行为与未启用时完全一致。
+        this->declare_parameter<std::string>("traversability.yaml_path", "");
+        std::string trav_yaml = this->get_parameter("traversability.yaml_path").as_string();
+        if (!trav_yaml.empty())
+        {
+            if (edt_env_->loadTraversability(trav_yaml))
+                RCLCPP_INFO(this->get_logger(), "Traversability layer loaded: %s", trav_yaml.c_str());
+            else
+                RCLCPP_WARN(this->get_logger(),
+                            "Traversability yaml_path set but load failed (layer disabled): %s",
+                            trav_yaml.c_str());
+        }
+
         // --- Init A* ---
         kino_astar_ = std::make_shared<KinodynamicAstar>();
         kino_astar_->setParam(node_ptr);
@@ -61,6 +75,7 @@ public:
         // --- Init MINCO ---
         this->declare_parameter<double>("minco_opt.lambda_smooth", 0.1);
         this->declare_parameter<double>("minco_opt.lambda_col",    8.0);
+        this->declare_parameter<double>("minco_opt.lambda_oneway", 8.0);
         this->declare_parameter<double>("minco_opt.lambda_feas",   0.001);
         this->declare_parameter<double>("minco_opt.dist0",         0.05);
         this->declare_parameter<double>("minco_opt.dist0_vel_k",   0.0);
@@ -112,7 +127,8 @@ public:
             this->get_parameter("minco_opt.robot_radius").as_double(),
             this->get_parameter("minco_opt.num_samples").as_int(),
             this->get_parameter("minco_opt.max_iter").as_int(),
-            this->get_parameter("minco_opt.max_time_ms").as_double() / 1000.0);
+            this->get_parameter("minco_opt.max_time_ms").as_double() / 1000.0,
+            this->get_parameter("minco_opt.lambda_oneway").as_double());
 
         // --- Init TrajectoryTracker ---
         this->declare_parameter<double>("controller.frequency", 50.0);
