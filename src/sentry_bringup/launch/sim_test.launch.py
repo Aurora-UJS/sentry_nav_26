@@ -104,6 +104,14 @@ def generate_launch_description():
         output="screen",
     )
 
+    # 可通行性标注层 .trav.yaml: bringup 作为地图路径的唯一来源, 注入给两个规划器。
+    # 出厂模板 regions:[] => 标注层禁用(行为与未启用一致), 故默认接上也安全。
+    trav_yaml_path = os.path.join(
+        get_package_share_directory("sentry_bringup"),
+        "map",
+        "rmuc_2025.trav.yaml",
+    )
+
     # === 6. Sentry Planner (延迟10秒，等LIO初始化完成) ===
     planner_launch = TimerAction(
         period=12.0,
@@ -116,7 +124,10 @@ def generate_launch_description():
                         "planner.launch.py",
                     )
                 ),
-                launch_arguments={"use_sim_time": "true"}.items(),
+                launch_arguments={
+                    "use_sim_time": "true",
+                    "trav_yaml": trav_yaml_path,
+                }.items(),
             )
         ],
     )
@@ -141,6 +152,7 @@ def generate_launch_description():
                 launch_arguments={
                     "use_sim_time": "true",
                     "map_yaml": map_yaml_path,
+                    "trav_yaml": trav_yaml_path,
                 }.items(),
             )
         ],

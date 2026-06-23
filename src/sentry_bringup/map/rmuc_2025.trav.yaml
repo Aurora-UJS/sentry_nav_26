@@ -1,0 +1,111 @@
+# =============================================================================
+# rmuc_2025.trav.yaml  —  可通行性标注层 (Traversability annotation layer)
+# =============================================================================
+#
+# 这是 rmuc_2025 先验地图的"可通行性补充标注"，给规划器引入第三态：
+#   free      普通可通行 (无约束)
+#   obstacle  人工补充障碍 (双向禁止) —— 在线感知看不到、但物理存在的障碍
+#   oneway    单向可通行 (带允许行进方向 + 容差) —— 典型如"只能下不能上"的台阶
+#
+# This file augments the prior PGM map (rmuc_2025.yaml) with a traversability
+# layer. It adds a third cell state ONEWAY (direction + tolerance) plus manual
+# OBSTACLE overlays, shared by global JPS / local Kinodynamic A* / MINCO.
+#
+# 动机 / motivation:
+#   雷达架设较高，在线感知看不到台阶立面 → 占用图把台阶当成"平地可通行"，
+#   但物理上车只能从高处往低处下、不能从低处往高处上。本层把这种"地图说能走、
+#   实际单向"的先验知识离线写进来，规划器查询即可遵守。
+#
+# -----------------------------------------------------------------------------
+# 默认 INERT（出厂关闭）/ ships INERT by default
+# -----------------------------------------------------------------------------
+#   regions 为空 → loadFromYaml() 返回 false → 本层 disabled → 所有查询按
+#   FREE/放行处理 → 行为与未启用标注层时完全一致（零行为变化）。
+#   regions: []  -> loadFromYaml() returns false -> layer disabled -> identical
+#   to today's behavior. The feature is OPT-IN: 用户标注前不影响任何现有逻辑。
+#
+#   要启用：把下方注释掉的 EXAMPLE 区块复制到 regions: 列表里，替换成真实坐标。
+#   To enable: copy an example block below into the regions list with real
+#   coordinates, then point the planner at this file (see docs/TRAVERSABILITY.md).
+# =============================================================================
+
+# ---- 地图元信息 / map metadata ----------------------------------------------
+# 与 rmuc_2025.yaml 保持同坐标系：世界/odom 系，单位米。
+# 约定规划器起点 = 地图原点，因此标注无需额外 TF 即与 odom 对齐。
+# Same frame as rmuc_2025.yaml: world == odom (meters), start-at-origin convention,
+# so no extra TF is needed to align annotations with the planner.
+map:
+  resolution: 0.05          # 栅格分辨率 (m)，与先验地图一致 / grid resolution, matches prior map
+  origin: [-3.58, -9.44]    # 栅格 (0,0) 左下角世界坐标，与 rmuc_2025.yaml 的 origin 一致
+                            # world coord of grid cell (0,0) lower-left; matches rmuc_2025.yaml origin
+  width: 0                  # 0 = 自动：由所有 region 多边形的包围盒推导栅格尺寸
+  height: 0                 # 0 = auto: grid size derived from the bbox of all region polygons
+                            # （若同时显式给出 width/height>0 且 origin，则用声明值）
+
+# 默认容差半张角 (度)。region 未单独写 tolerance_deg 时取此值。
+# Default tolerance half-angle (deg). Used when a region omits tolerance_deg.
+# 90° = 前向半球锥 (cos_tol = 0)：只要行进方向在允许朝向的前半球（点积为正）即放行。
+# 90° = forward hemisphere (cos_tol = 0): any travel with a positive component
+# along the arrow is allowed; reverse travel is blocked.
+default_tolerance_deg: 90.0
+
+# ---- 标注区域 / regions -----------------------------------------------------
+# 出厂为空列表 → 本层关闭。请勿在未标注前填入占位区域。
+# Empty list -> layer disabled. Do not add placeholder regions before annotating.
+regions: []
+
+# =============================================================================
+# 示例区块（已注释，仅供参考，不会被解析）
+# EXAMPLE blocks below are commented out — they are NOT parsed.
+# 下方坐标为「说明用示意值」，不是 RMUC 真实台阶位置（真实位置由用户实测填写）。
+# Coordinates below are ILLUSTRATIVE ONLY, not the real RMUC step locations
+# (those are TBD — measure them in your map and fill in).
+# =============================================================================
+#
+# regions:
+#
+#   # ------ 示例 1：单向台阶（只能下、不能上）/ one-way step (down-only) ------
+#   - id: step_south_descend            # 任意可读标识 / arbitrary readable id
+#     type: oneway                      # 类型 free | obstacle | oneway
+#     # direction_deg = 允许行进朝向（世界系航向角），= atan2(dy, dx) 的度数。
+#     # direction_deg = ALLOWED travel heading in the world frame, atan2(dy,dx) degrees.
+#     #   0   = +X (东 / east)    90  = +Y (北 / north)
+#     #  -90  = -Y (南 / south)   180 = -X (西 / west)
+#     # 这里台阶从北往南是"下坡"，故允许朝向取 -90°（向南下台阶放行，向北上台阶被挡）。
+#     # Here the step descends toward -Y (south), so allowed heading = -90°:
+#     # traveling south (down) passes; traveling north (up) is blocked.
+#     direction_deg: -90.0
+#     # tolerance_deg = 半张角（度）。放行条件：dot(unit(travel), dir) >= cos(tolerance_deg)。
+#     # tolerance_deg = half-angle (deg). Pass condition: dot(unit(travel), dir) >= cos(tol).
+#     #   90° -> cos = 0   -> 前向半球都放行 / whole forward hemisphere allowed
+#     #   45° -> cos ≈ 0.707 -> 仅 ±45° 锥内放行 / only within a ±45° cone
+#     #    0° -> cos = 1   -> 只允许严格同向 / only exactly along the arrow
+#     tolerance_deg: 90.0
+#     # polygon = 区域多边形顶点（世界坐标米，>=3 个；首尾自动闭合，顺/逆时针均可）。
+#     # polygon = region vertices (world meters, >=3; auto-closed, CW or CCW ok).
+#     # 此处用一个矩形覆盖台阶踏面（示意坐标）。
+#     # A rectangle covering the step tread (illustrative coordinates).
+#     polygon:
+#       - [ 1.20, -2.40 ]
+#       - [ 2.60, -2.40 ]
+#       - [ 2.60, -3.10 ]
+#       - [ 1.20, -3.10 ]
+#
+#   # ------ 示例 2：人工补充障碍（双向禁止）/ manual obstacle (both ways blocked) --
+#   # 用于在线感知看不到、但确实挡路的结构（如悬空横杆下方不可钻、玻璃栏杆等）。
+#   # For structures online perception misses but that truly block passage.
+#   - id: blind_corner_post
+#     type: obstacle                    # obstacle 不需要 direction_deg / tolerance_deg
+#     polygon:                          # obstacle ignores direction/tolerance fields
+#       - [ -0.50,  3.00 ]
+#       - [  0.10,  3.00 ]
+#       - [  0.10,  3.60 ]
+#       - [ -0.50,  3.60 ]
+#
+#   # 提示 / notes:
+#   #  - 区域可重叠；后写的覆盖先写的（regions 顺序即优先级）。
+#   #    Regions may overlap; later entries override earlier ones (order = priority).
+#   #  - 顶点坐标可用 RViz 的 "Publish Point" 工具点取 (/clicked_point) 读取，
+#   #    或用 sentry_trav_rviz_plugin 标注插件可视化绘制后导出。
+#   #    Read vertex coords via RViz "Publish Point" (/clicked_point), or draw with
+#   #    the sentry_trav_rviz_plugin and export. 详见 docs/TRAVERSABILITY.md。
