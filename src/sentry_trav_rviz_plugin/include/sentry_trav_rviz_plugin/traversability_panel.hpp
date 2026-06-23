@@ -48,6 +48,9 @@ private Q_SLOTS:
     void onNewRegion();      // 开始一段新多边形
     void onFinishRegion();   // 结束并提交当前多边形
     void onDeleteRegion();   // 删除列表选中区域
+    void onSelectRegion(int row);  // 选中已画区域 → 属性载回上方表单
+    void onApplyRegion();    // 把表单属性写回选中区域 (改 类型/方向/容差/id)
+    void onPickDirection();  // 进入方向拾取态: 在地图点 起点→终点, 自动算 direction_deg
     void onLoad();           // 读 .trav.yaml
     void onSave();           // 写 .trav.yaml
 
@@ -67,7 +70,8 @@ private:
         std::vector<std::pair<double, double>> polygon;  // 世界坐标 (米)
     };
 
-    void addPoint(double x, double y);   // 收点统一入口 (tool / clicked_point 共用)
+    void handlePoint(double x, double y);  // 收点分流入口: 方向拾取态 vs 多边形绘制态
+    void addPoint(double x, double y);   // 多边形收点 (内部判 drawing_)
     void refreshList();                  // 同步区域列表 UI
     void publishPreview();               // 重新发布 MarkerArray 预览
     std::string activeFrame() const;     // 当前 RViz fixed frame (默认 map)
@@ -86,11 +90,15 @@ private:
     QListWidget * region_list_ = nullptr;
     QPushButton * new_btn_ = nullptr;
     QPushButton * finish_btn_ = nullptr;
+    QPushButton * apply_btn_ = nullptr;
+    QPushButton * pick_dir_btn_ = nullptr;
 
     // --- 数据 ---
     std::vector<Region> regions_;
     Region current_;        // 进行中的多边形 (含本段元信息快照)
     bool drawing_ = false;
+    bool picking_dir_ = false;                       // 方向拾取态 (与 drawing_ 互斥)
+    std::vector<std::pair<double, double>> dir_pts_; // 方向拾取已收的点 (满 2 即算角度)
 
     // --- ROS ---
     rclcpp::Node::SharedPtr node_;

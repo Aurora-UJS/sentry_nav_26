@@ -93,8 +93,17 @@ TraversabilityPanel::TraversabilityPanel(QWidget * parent)
     connect(new_btn_, &QPushButton::clicked, this, &TraversabilityPanel::onNewRegion);
     connect(finish_btn_, &QPushButton::clicked, this, &TraversabilityPanel::onFinishRegion);
 
+    // 方向拾取: 在地图点 起点→终点, 自动算 direction_deg (仅 oneway 有意义)
+    pick_dir_btn_ = new QPushButton("Pick Direction (2 pts)");
+    connect(pick_dir_btn_, &QPushButton::clicked, this, &TraversabilityPanel::onPickDirection);
+
     // ---- 区域列表 ----
     region_list_ = new QListWidget;
+    // 选中已画区域 → 把它的属性载回上方表单 (配合 Apply 修改已画区域)
+    connect(region_list_, &QListWidget::currentRowChanged,
+            this, &TraversabilityPanel::onSelectRegion);
+    apply_btn_ = new QPushButton("Apply to Selected");
+    connect(apply_btn_, &QPushButton::clicked, this, &TraversabilityPanel::onApplyRegion);
     auto * del_btn = new QPushButton("Delete Selected");
     connect(del_btn, &QPushButton::clicked, this, &TraversabilityPanel::onDeleteRegion);
 
@@ -138,9 +147,13 @@ TraversabilityPanel::TraversabilityPanel(QWidget * parent)
     auto * root = new QVBoxLayout;
     root->addWidget(attr_box);
     root->addLayout(draw_row);
+    root->addWidget(pick_dir_btn_);
     root->addWidget(new QLabel("Regions:"));
     root->addWidget(region_list_);
-    root->addWidget(del_btn);
+    auto * edit_row = new QHBoxLayout;
+    edit_row->addWidget(apply_btn_);
+    edit_row->addWidget(del_btn);
+    root->addLayout(edit_row);
     root->addWidget(map_box);
     root->addLayout(io_row);
     setLayout(root);
@@ -162,7 +175,7 @@ void TraversabilityPanel::onInitialize()
         clicked_sub_ = node_->create_subscription<geometry_msgs::msg::PointStamped>(
             "/clicked_point", rclcpp::QoS(10),
             [this](geometry_msgs::msg::PointStamped::ConstSharedPtr msg) {
-                addPoint(msg->point.x, msg->point.y);
+                handlePoint(msg->point.x, msg->point.y);
             });
     }
 
@@ -199,6 +212,14 @@ void TraversabilityPanel::onNewRegion()
 
 void TraversabilityPanel::onFinishRegion()
 {
+    if (picking_dir_) {   // 方向拾取中: 右键/Esc/Finish 视为取消拾取
+        picking_dir_ = false;
+        dir_pts_.clear();
+        if (node_) {
+            RCLCPP_INFO(node_->get_logger(), "[trav] 方向拾取已取消");
+        }
+        return;
+    }
     if (drawing_) {
         if (current_.polygon.size() >= 3) {
             if (current_.id.empty()) {
@@ -228,9 +249,95 @@ void TraversabilityPanel::onDeleteRegion()
     }
 }
 
+// 选中列表里某区域 → 把它的属性载回上方表单 (查看/准备修改)。绘制/拾取中不打断。
+void TraversabilityPanel::onSelectRegion(int row)
+{
+    if (drawing_ || picking_dir_) {
+        return;
+    }
+    if (row < 0 || row >= static_cast<int>(regions_.size())) {
+        return;
+    }
+    const Region & r = regions_[row];
+    type_combo_->setCurrentIndex(r.type);
+    dir_spin_->setValue(r.dir_deg);
+    tol_spin_->setValue(r.tol_deg);
+    id_edit_->setText(QString::fromStdString(r.id));
+}
+
+// 把上方表单的属性写回选中区域 (改 类型/方向/容差/id; 多边形顶点不变)。
+void TraversabilityPanel::onApplyRegion()
+{
+    const int row = region_list_->currentRow();
+    if (row < 0 || row >= static_cast<int>(regions_.size())) {
+        QMessageBox::information(this, "Traversability",
+                                 "请先在 Regions 列表里选中一个区域。");
+        return;
+    }
+    Region & r = regions_[row];
+    r.type = type_combo_->currentIndex();
+    r.dir_deg = dir_spin_->value();
+    r.tol_deg = tol_spin_->value();
+    const std::string new_id = id_edit_->text().toStdString();
+    if (!new_id.empty()) {
+        r.id = new_id;
+    }
+    refreshList();
+    region_list_->setCurrentRow(row);  // refreshList 会清空选择, 这里恢复
+    publishPreview();
+    if (node_) {
+        RCLCPP_INFO(node_->get_logger(), "[trav] 已更新区域 #%d (%s)", row, r.id.c_str());
+    }
+}
+
+// 进入方向拾取态: 在地图依次点 起点→终点, 自动 atan2 算 direction_deg。
+void TraversabilityPanel::onPickDirection()
+{
+    if (drawing_) {
+        QMessageBox::information(this, "Traversability",
+                                 "请先 Finish 当前多边形, 再拾取方向。");
+        return;
+    }
+    // 方向只对 oneway 有意义, 自动切到 oneway 让 Direction 框可用
+    if (type_combo_->currentIndex() != 2) {
+        type_combo_->setCurrentIndex(2);
+    }
+    picking_dir_ = true;
+    dir_pts_.clear();
+    if (node_) {
+        RCLCPP_INFO(node_->get_logger(),
+                    "[trav] 方向拾取: 在地图依次点 起点→终点 (沿允许行进方向); 右键取消");
+    }
+}
+
+// 收点分流: 方向拾取态收两点算角度; 否则交给多边形绘制 (addPoint 内部判 drawing_)。
+void TraversabilityPanel::handlePoint(double x, double y)
+{
+    if (picking_dir_) {
+        dir_pts_.emplace_back(x, y);
+        if (dir_pts_.size() >= 2) {
+            const double dx = dir_pts_[1].first - dir_pts_[0].first;
+            const double dy = dir_pts_[1].second - dir_pts_[0].second;
+            if (std::hypot(dx, dy) > 1e-6) {
+                const double deg = std::atan2(dy, dx) * 180.0 / M_PI;
+                dir_spin_->setValue(deg);
+                if (node_) {
+                    RCLCPP_INFO(node_->get_logger(), "[trav] direction_deg = %.1f", deg);
+                }
+            } else if (node_) {
+                RCLCPP_WARN(node_->get_logger(), "[trav] 两点重合, 方向无效, 请重试");
+            }
+            picking_dir_ = false;
+            dir_pts_.clear();
+        }
+        return;
+    }
+    addPoint(x, y);
+}
+
 void TraversabilityPanel::onToolPoint(double x, double y)
 {
-    addPoint(x, y);
+    handlePoint(x, y);
 }
 
 void TraversabilityPanel::onToolFinish()
