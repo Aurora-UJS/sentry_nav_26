@@ -158,7 +158,32 @@ travel_dir 单位化为 t，dir 为 d（单位向量），cos_tol = cos(toleranc
 
 ### A. RViz 标注插件（推荐）
 
-`sentry_trav_rviz_plugin`（标注插件）可在 RViz 里**可视化绘制**多边形、设置类型/方向/容差，导出成 `*.trav.yaml`。适合大批量、所见即所得的标注。
+`sentry_trav_rviz_plugin` 可在 RViz 里**所见即所得**地绘制多边形、设类型/方向/容差，导出 `*.trav.yaml`。`git clone` → `colcon build` → `source install/setup.zsh` → 开 `rviz2` 后，插件即自动出现在面板/工具列表（pluginlib 自动注册，无需配置）。
+
+**加载（一次性）**
+1. `Panels → Add New Panel → sentry_trav_rviz_plugin/TraversabilityPanel`。
+2. 工具栏 `+ → sentry_trav_rviz_plugin/TraversabilityTool`（快捷键 `r`）。
+3. `Add → MarkerArray`，话题设 `/traversability_annotation_preview`（实时预览）。
+4. `Fixed Frame` 设为标注坐标系（`odom`）。
+
+**画一个区域**
+1. Panel 选 `Type`（free/obstacle/oneway）、`Tolerance`（默认 90°）、`Id`（留空自动命名）。
+2. **必须先点 `New Region`** 进入绘制态。⚠️ 不点直接在地图点击，取的点会被忽略（最常见的「画不出来」原因）。
+3. 选中 Tool，地面**左键**依次点多边形顶点（≥3 个）；`Backspace` 撤销上一点。
+4. **右键 / Esc / Finish Region** 提交，区域进入列表。
+
+**设方向（oneway）—— 点两点定方向**
+- 点 `Pick Direction (2 pts)`（自动切到 oneway）→ 在地图上**顺着想走的方向**点 起点→终点 → 程序 `atan2` 自动算出 `direction_deg` 填好。右键取消。比手填角度直观，尤其适合台阶下坡方向。
+
+**改已画区域**
+- 列表里**选中**一个区域 → 属性载回表单 → 改 `Type/Direction/Tolerance/Id` → `Apply to Selected` 写回（多边形不变）。`Delete Selected` 删除。
+
+**保存 + 生效**
+- `Save .trav.yaml`；`Load .trav.yaml` 可回读续编。
+- ⚠️ **Save 路径坑**：规划器 launch 加载的是 **install 副本** `install/sentry_bringup/share/sentry_bringup/map/rmuc_2025.trav.yaml`，不是 `src`。Save 到 `src` 后要 `colcon build --packages-select sentry_bringup` 才同步；想免重编译，先做一次 `colcon build --symlink-install --packages-select sentry_bringup`，之后 Save 到 `src` 即时生效。
+- 标注在规划器**启动时一次性加载**，改完要**重启规划器**才生效。
+
+> 详细按钮说明与设计见 `src/sentry_trav_rviz_plugin/README.md`。
 
 ### B. 手编 yaml + Publish Point 读坐标
 
