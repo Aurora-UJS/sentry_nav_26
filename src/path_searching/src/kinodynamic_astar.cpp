@@ -235,6 +235,21 @@ namespace fast_planner
                             is_occ = true;
                             break;
                         }
+                        // obstacle 为人工补充障碍: 可通行层标注为 OBSTACLE 的区域直接当占据剔除
+                        if (env_->getTravType(pos) == 1)
+                        {
+                            is_occ = true;
+                            break;
+                        }
+                        // oneway 单向台阶: 逆向行驶被禁止, 用该采样点速度 xt.tail(2) 作为行进方向
+                        {
+                            Eigen::Vector2d vel = xt.tail(2);
+                            if (!env_->isDirectionAllowed(pos, vel))
+                            {
+                                is_occ = true;
+                                break;
+                            }
+                        }
                     }
                     if (is_occ)
                     {
@@ -426,6 +441,12 @@ namespace fast_planner
             // }
             // DISC collision test: exact, O(1) and inherently diagonal-safe.
             if (!env_->isInMap(coord) || env_->getDistance(coord) < robot_radius_)
+                return false;
+            // obstacle 为人工补充障碍: 可通行层标注为 OBSTACLE 的区域视为占据
+            if (env_->getTravType(coord) == 1)
+                return false;
+            // oneway 单向台阶: 逆向行驶被禁止, 复用上面算出的多项式解析速度 vel 作为行进方向
+            if (!env_->isDirectionAllowed(coord, vel))
                 return false;
         }
         coef_shot_ = coef;
