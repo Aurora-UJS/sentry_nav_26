@@ -341,6 +341,30 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 
 ---
 
+## 可通行性标注层（方向性 / 单向）
+
+先验 PGM 与在线占用图都是「无方向」的双态地图——能走就双向都能走。但雷达架设较高，扫不到台阶**立面**，会把「只能下不能上」的台阶当成双向平地。**可通行性标注层**离线补一张与地图同坐标系的 `*.trav.yaml`，给规划器引入第三态：
+
+| 类型 | 含义 |
+|---|---|
+| `free` | 普通可通行（无约束）|
+| `obstacle` | 人工补充障碍（双向禁止，补感知盲区）|
+| `oneway` | 单向可通行（带允许行进朝向 `direction_deg` + 容差锥 `tolerance_deg`）|
+
+- **帧约定**：世界/odom 系、米，origin 取 `rmuc_2025.yaml` 的 origin；规划器起点 = 地图原点，故**无需额外 TF**。
+- **方向语义**：`direction_deg` = 允许行进航向 `atan2(dy,dx)` 度数；放行 ⇔ `dot(unit(travel), dir) >= cos(tolerance_deg)`；默认 `90°`（cos=0）= 前向半球，逆向被挡。
+- **各层 gate**：全局 JPS = **软方向代价 + obstacle 叠加**（不硬挡 oneway，保持全局图连通完整）；局部 Kinodynamic A* + MINCO = **硬方向约束**（基于边，逆向直接剪除）。
+- **OPT-IN，默认关**：出厂 `rmuc_2025.trav.yaml` 为 `regions: []` → `loadFromYaml()` 返回 false → 本层 disabled → 行为与今天完全一致。仅当指向含有效 region 的 yaml 时才生效：
+
+```bash
+ros2 launch sentry_bringup bringup.launch.py \
+    trav_yaml:=$HOME/sentry_nav_26/install/sentry_bringup/share/sentry_bringup/map/rmuc_2025.trav.yaml
+```
+
+> 标注用 RViz `Publish Point`（`/clicked_point` 回读坐标）手编 yaml，或用 `sentry_trav_rviz_plugin` 可视化绘制导出。完整数据模型、格式、gate 机制与已知限制见 **[docs/TRAVERSABILITY.md](docs/TRAVERSABILITY.md)**。
+
+---
+
 ## 当前实现状态
 
 | 模块 | 完成度 | 备注 |
@@ -352,6 +376,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 | 时间衰减体素 (STVL) | ❌ | log-odds 永久累积，无衰减 |
 | 视锥清除 | ❌ | 未实现 |
 | 可通行性融合层 | ❌ | 未实现 |
+| 可通行性标注层（单向/方向）| 🟡 | 静态离线标注；OPT-IN 默认关（`regions: []` 即 disabled）；全局软代价 + 局部 A*/MINCO 硬约束；详见 `docs/TRAVERSABILITY.md` |
 | 全局规划 (JPS, 静态先验) | ✅ | 完整可用 |
 | 全局规划在线模式 | 🟡 | `OnlineMapProxy` 已接入 JPS（global_planner_node.cpp `online` 分支：建 SDFMap → proxy → `jps_.setMap`），但未端到端验证；按当前 launch 配置直接启用会因缺 `sdf_map.*` 参数令 SDFMap 抛异常崩溃，需先补全参数接线，且为局部窗口/odom 系，不适合替代 prior 做全局 |
 | Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF disc 碰撞检测（getDistance < robot_radius）|
