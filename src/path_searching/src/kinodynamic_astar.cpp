@@ -47,6 +47,9 @@ namespace fast_planner
         allocate_num_ = node_->declare_parameter<int>("search.allocate_num", 100000);
         check_num_ = node_->declare_parameter<int>("search.check_num", 50);
         robot_radius_ = node_->declare_parameter<double>("search.robot_radius", 0.3);
+        w_clearance_ = node_->declare_parameter<double>("search.w_clearance", 20.0);
+        start_ignore_radius_ = node_->declare_parameter<double>("search.start_ignore_radius", 0.35);
+        clearance_dist_ = node_->declare_parameter<double>("search.clearance_dist", 0.5);
         tie_breaker_ = 1.0 + 1.0 / 10000;
 
         // 预计算 footprint 采样点偏移: 中心 + 上下左右 4 个点
@@ -65,6 +68,7 @@ namespace fast_planner
 
         start_vel_ = start_v;
         start_acc_ = start_a;
+        start_pos_ = start_pt;
 
         PathNodePtr cur_node = path_node_pool_[0];
         cur_node->parent = NULL;
@@ -235,6 +239,18 @@ namespace fast_planner
                         double dt = tau * double(k) / double(check_num_);
                         stateTransit(cur_state, xt, um, dt);
                         pos = xt.head(2);
+                        // 起点豁免: 已占据的区域不算未来碰撞（与安全监控 self_ignore
+                        // 同一哲学）。贴墙/贴静态标注被 BRAKE 后，起点 footprint 压在
+                        // 障碍上会让所有规划失败形成死锁；豁免半径内只查中心点出图。
+                        if ((pos - start_pos_).norm() < start_ignore_radius_)
+                        {
+                            if (!env_->isInMap(pos))
+                            {
+                                is_occ = true;
+                                break;
+                            }
+                            continue;
+                        }
                         bool fp_occ = false;
                         for (const auto &offset : footprint_offsets_)
                         {
@@ -259,6 +275,16 @@ namespace fast_planner
 
                     double time_to_goal, tmp_g_score, tmp_f_score;
                     tmp_g_score = (um.squaredNorm() + w_time_) * tau + cur_node->g_score;
+                    // 靠近障碍软惩罚 (rose A* clearance_weight 思想):
+                    // 间隙不足 clearance_dist 的节点按不足量加代价，让搜索
+                    // 在有余地时主动选宽敞走廊，而不是贴着可行边界走最短路
+                    if (w_clearance_ > 0.0)
+                    {
+                        double esdf = env_->getDistance(Eigen::Vector2d(pro_state.head(2)));
+                        double shortfall = clearance_dist_ - esdf;
+                        if (shortfall > 0.0)
+                            tmp_g_score += w_clearance_ * shortfall * tau;
+                    }
                     tmp_f_score = tmp_g_score + lambda_heu_ * estimateHeuristic(pro_state, end_state, time_to_goal);
 
                     // Compare nodes expanded from the same parent

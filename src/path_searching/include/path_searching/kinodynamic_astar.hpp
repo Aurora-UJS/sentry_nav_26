@@ -148,6 +148,10 @@ namespace fast_planner
         double max_tau_, init_max_tau_;
         double max_vel_, max_acc_;
         double robot_radius_ = 0.3;
+        double w_clearance_ = 20.0;    // 靠近障碍软惩罚权重
+        double clearance_dist_ = 0.5;  // 期望间隙 (m)，esdf 低于它开始加代价
+        double start_ignore_radius_ = 0.35;  // 起点豁免半径: 贴墙起步不算碰撞
+        Eigen::Vector2d start_pos_ = Eigen::Vector2d::Zero();
         std::vector<Eigen::Vector2d> footprint_offsets_;
         bool has_path_ = false;
 
