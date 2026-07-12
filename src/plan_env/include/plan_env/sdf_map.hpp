@@ -87,7 +87,6 @@ private:
   std::vector<std::shared_ptr<nav_msgs::msg::OccupancyGrid>> map_msgs;
 
   // 高度过滤参数 (ROS 参数读取后缓存)
-  double cloud_min_height_ = -0.1, cloud_max_height_ = 1.0;
 
   // ROS 回调
   void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom);

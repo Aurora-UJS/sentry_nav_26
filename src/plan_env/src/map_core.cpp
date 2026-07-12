@@ -14,8 +14,6 @@ void MapCore::initBuffers(const MappingParameters &mp, int buffer_size)
     md_.distance_buffer_neg_ = vector<double>(buffer_size, 10000);
     md_.distance_buffer_all_ = vector<double>(buffer_size, 10000);
     md_.tmp_buffer1_ = vector<double>(buffer_size, 0);
-    md_.elevation_buffer_ = vector<float>(buffer_size, std::numeric_limits<float>::quiet_NaN());
-    md_.slope_obstacle_buffer_ = vector<char>(buffer_size, 0);
     md_.logodds_buffer_ = vector<float>(buffer_size, 0.0f);
     md_.last_hit_time_ = vector<float>(buffer_size, MappingData::kNeverHit);
 
@@ -173,8 +171,6 @@ void MapCore::clearRingSlice(int dim, int from, int to)
         md_.distance_buffer_neg_[addr] = 10000;
         md_.distance_buffer_all_[addr] = 10000;
         md_.tmp_buffer1_[addr] = 0;
-        md_.elevation_buffer_[addr] = std::numeric_limits<float>::quiet_NaN();
-        md_.slope_obstacle_buffer_[addr] = 0;
         md_.logodds_buffer_[addr] = 0.0f;
         md_.last_hit_time_[addr] = MappingData::kNeverHit;
     };

@@ -63,7 +63,11 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	esdf_timer_ = node_->create_wall_timer(0.05s, std::bind(&SDFMap::updateESDFCallback, this));
 	mp.obstacles_inflation_ = node_->declare_parameter<double>("sdf_map.obstacles_inflation", 0.0009);
 	mp.max_slope_rad_ = node_->declare_parameter<double>("sdf_map.max_slope_deg", 17.0) * M_PI / 180.0;
-	mp.step_height_max_ = node_->declare_parameter<double>("sdf_map.step_height_max", 0.08);
+	mp.cloud_min_h_ = node_->declare_parameter<double>("sdf_map.cloud_min_height", -0.2);
+	mp.cloud_max_h_ = node_->declare_parameter<double>("sdf_map.cloud_max_height", 0.15);
+	mp.normal_voxel_leaf_ = node_->declare_parameter<double>("sdf_map.normal_voxel_leaf", 0.08);
+	mp.normal_k_ = node_->declare_parameter<int>("sdf_map.normal_k", 10);
+	mp.normal_count_thresh_ = node_->declare_parameter<int>("sdf_map.normal_count_thresh", 3);
 	mp.local_map_margin_ = node_->declare_parameter<int>("sdf_map.local_map_margin", 10);
 	mp.local_update_range_(0) = node_->declare_parameter<double>("sdf_map.local_update_range_x", 3.0);
 	mp.local_update_range_(1) = node_->declare_parameter<double>("sdf_map.local_update_range_y", 3.0);
@@ -108,9 +112,6 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	{
 		std::string cloud_topic = node_->declare_parameter<std::string>("sdf_map.cloud_topic", "/cloud_registered");
 		RCLCPP_INFO(node_->get_logger(), "Using PointCloud2 input on topic: %s", cloud_topic.c_str());
-
-		cloud_min_height_ = node_->declare_parameter<double>("sdf_map.cloud_min_height", -0.1);
-		cloud_max_height_ = node_->declare_parameter<double>("sdf_map.cloud_max_height", 1.0);
 
 		cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
 			cloud_topic, rclcpp::SensorDataQoS(),

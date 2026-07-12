@@ -9,14 +9,19 @@ sentry_local_planner:
       use_global_map: false
       use_cloud_input: true
       cloud_topic: "/cloud_registered"
-      cloud_min_height: -0.2        # 包含低于机器人的地面/坡面
-      cloud_max_height: 0.8         # 机器人高度以上的悬空障碍
+      # --- 法向量坡度判定 (z 带相对机身 z，随上/下坡移动) ---
+      # 只取机身高度附近的表面判障碍: 高处平台面/桥面不在带内，
+      # 台阶/墙的竖直面在带内 |n.z|≈0 → 障碍；地板/≤17°坡面 |n.z|≈1 → 可通行
+      cloud_min_height: -0.2        # z 带下沿 (相对机身 z)
+      cloud_max_height: 0.15        # z 带上沿；旧值 0.8 会把可从旁边绕过的高处结构也标成障碍
+      normal_voxel_leaf: 0.08       # 法向量估计前的体素降采样 (m)
+      normal_k: 10                  # kNN 邻域点数
+      normal_count_thresh: 2        # 每格最少支持点数，防稀疏噪声成障
       map_size_x: 30.0              # RMUC 赛场 ~15x28m, 留余量
       map_size_y: 30.0
       resolusion_: 0.05             # 5cm 分辨率 (600x600=360K 格子)
       obstacles_inflation: 0.05     # 仅做地图噪声平滑，车体安全由 footprint 检测负责
       max_slope_deg: 17.0           # 最大可通行坡度 17° (RMUC 赛场 15° + 余量)
-      step_height_max: 0.08         # 最大可通行台阶高度 8cm
       local_map_margin: 10
       local_update_range_x: 8.0     # 局部更新范围 8m
       local_update_range_y: 8.0

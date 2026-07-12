@@ -35,9 +35,15 @@ struct MappingParameters
 
   double resolution_, resolution_inv_;
   double obstacles_inflation_;
-  double max_slope_rad_;
-  double step_height_max_;
   bool show_esdf_time_, show_occ_time_;
+
+  // 法向量坡度判定参数
+  double max_slope_rad_;        // 平均 |n.z| < cos(此角) 判障碍
+  double cloud_min_h_ = -0.2;   // z 带下沿 (相对机身 z)
+  double cloud_max_h_ = 0.15;   // z 带上沿 (相对机身 z)：只看机身高度附近的表面
+  double normal_voxel_leaf_ = 0.08; // 法向量前的体素降采样 (m)
+  int normal_k_ = 10;           // kNN 邻域点数
+  int normal_count_thresh_ = 3; // 每格最少支持点数，防稀疏噪声成障
 
   // Log-odds 贝叶斯占据更新参数
   double logodds_hit_, logodds_miss_;
@@ -66,9 +72,6 @@ struct MappingData
   std::vector<double> distance_buffer_all_;
 
   std::vector<double> distance_buffer_;
-
-  std::vector<float> elevation_buffer_;
-  std::vector<char> slope_obstacle_buffer_;
 
   // Log-odds 累积值，0 = 未知
   std::vector<float> logodds_buffer_;

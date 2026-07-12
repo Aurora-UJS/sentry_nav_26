@@ -13,9 +13,18 @@ ament_auto_find_build_dependencies()
 ## Build ##
 ###########
 
+find_package(PCL REQUIRED COMPONENTS common filters search kdtree features)
+find_package(OpenMP)
+
 ament_auto_add_library(${PROJECT_NAME} SHARED
   DIRECTORY src 
 )
+target_include_directories(${PROJECT_NAME} PUBLIC ${PCL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARIES})
+if(OpenMP_CXX_FOUND)
+  # NormalEstimationOMP 是头文件模板，在本包实例化，需要本包开 OpenMP 才真并行
+  target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
+endif()
 
 
 if(BUILD_TESTING)
