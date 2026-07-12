@@ -29,6 +29,9 @@ public:
         double mpc_q_pos = 10.0;
         double mpc_q_vel = 1.0;
         double mpc_r_acc = 0.1;
+        // true: cmd.linear 保持 odom/世界系，由下游（chassis_cmd_node / 电控 MCU）
+        // 用高频陀螺 yaw 旋转到机体系 —— 避免用带龄期的 LIO yaw 在 50Hz 侧旋转
+        bool world_frame_cmd = false;
     };
 
     void init(const Config &cfg, sentry_nav::EnvironmentInterface *env);

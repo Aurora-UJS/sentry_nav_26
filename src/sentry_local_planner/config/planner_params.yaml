@@ -52,6 +52,10 @@ sentry_local_planner:
       frequency: 50.0              # 控制频率 50Hz
       kp: 2.0                      # PD 位置误差增益
       spin_rate: 3.0               # 自转角速度 (rad/s)，改善 LiDAR 覆盖
+      # cmd_frame=world: 输出 odom 系速度到 /cmd_vel_world，由 chassis_cmd_node
+      # （真车=电控 MCU）用高频陀螺 yaw 旋转到机体系。诊断实测：自转 3 rad/s 下
+      # LIO yaw 有 ~50-70ms 龄期 (12~21° 误差)，在 50Hz 侧用它旋转会引入方向偏差。
+      cmd_frame: "world"           # "world" | "body"(旧行为，直接发 /cmd_vel)
       narrow_passage_dist: 0.5     # ESDF 距离 < 此值时停止自转，切换为航向对齐 (m)
       yaw_align_kp: 3.0            # 窄口航向对齐 P 增益
 

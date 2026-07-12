@@ -17,6 +17,8 @@
   <depend>plan_env</depend>
   <depend>path_searching</depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
+
   <export>
     <build_type>ament_cmake</build_type>
   </export>

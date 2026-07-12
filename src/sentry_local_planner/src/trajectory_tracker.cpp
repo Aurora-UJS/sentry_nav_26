@@ -49,10 +49,19 @@ geometry_msgs::msg::Twist TrajectoryTracker::compute(
     if (vel_cmd_odom.norm() > cfg_.max_vel)
         vel_cmd_odom = vel_cmd_odom.normalized() * cfg_.max_vel;
 
-    // Odom → body frame
-    double cy = cos(-yaw), sy = sin(-yaw);
-    cmd.linear.x = cy * vel_cmd_odom(0) - sy * vel_cmd_odom(1);
-    cmd.linear.y = sy * vel_cmd_odom(0) + cy * vel_cmd_odom(1);
+    if (cfg_.world_frame_cmd)
+    {
+        // 世界系输出：机体系旋转下沉到 chassis_cmd_node / 电控侧
+        cmd.linear.x = vel_cmd_odom(0);
+        cmd.linear.y = vel_cmd_odom(1);
+    }
+    else
+    {
+        // Odom → body frame
+        double cy = cos(-yaw), sy = sin(-yaw);
+        cmd.linear.x = cy * vel_cmd_odom(0) - sy * vel_cmd_odom(1);
+        cmd.linear.y = sy * vel_cmd_odom(0) + cy * vel_cmd_odom(1);
+    }
     cmd.angular.z = computeAngularVelocity(pos, yaw, traj, elapsed);
 
     return cmd;

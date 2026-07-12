@@ -25,9 +25,20 @@ def generate_launch_description():
         parameters=[planner_params, {"use_sim_time": use_sim_time}],
     )
 
+    # 仿真侧"底盘固件": /cmd_vel_world → 陀螺 yaw 旋转 → /cmd_vel
+    # 真车部署时删除本节点，由电控 MCU 实现同一逻辑
+    chassis_cmd_node = Node(
+        package="sentry_local_planner",
+        executable="chassis_cmd_node",
+        name="chassis_cmd",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
+    )
+
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             planner_node,
+            chassis_cmd_node,
         ]
     )
