@@ -87,8 +87,17 @@ public:
         // --- Init TrajectoryTracker ---
         this->declare_parameter<double>("controller.frequency", 50.0);
         this->declare_parameter<double>("controller.spin_rate", 3.0);
-        this->declare_parameter<double>("controller.narrow_passage_dist", 0.5);
+        this->declare_parameter<double>("controller.corridor_enter_dist", 0.55);
+        this->declare_parameter<double>("controller.corridor_exit_dist", 0.80);
+        this->declare_parameter<double>("controller.corridor_preview_time", 1.2);
+        this->declare_parameter<double>("controller.corridor_speed", 0.8);
+        this->declare_parameter<double>("controller.corridor_align_speed", 0.2);
+        this->declare_parameter<double>("controller.corridor_align_tol_deg", 20.0);
+        this->declare_parameter<double>("controller.corridor_lookahead", 0.6);
+        this->declare_parameter<double>("controller.slope_enter_deg", 7.0);
+        this->declare_parameter<double>("controller.slope_exit_deg", 4.0);
         this->declare_parameter<double>("controller.yaw_align_kp", 3.0);
+        this->declare_parameter<double>("controller.max_align_wz", 2.5);
         this->declare_parameter<int>("mpc.horizon", 10);
         this->declare_parameter<double>("mpc.q_pos", 10.0);
         this->declare_parameter<double>("mpc.q_vel", 1.0);
@@ -101,8 +110,20 @@ public:
         tcfg.max_acc = ma;
         tcfg.ctrl_dt = 1.0 / ctrl_freq;
         tcfg.spin_rate = this->get_parameter("controller.spin_rate").as_double();
-        tcfg.narrow_passage_dist = this->get_parameter("controller.narrow_passage_dist").as_double();
+        tcfg.corridor_enter_dist = this->get_parameter("controller.corridor_enter_dist").as_double();
+        tcfg.corridor_exit_dist = this->get_parameter("controller.corridor_exit_dist").as_double();
+        tcfg.corridor_preview_time = this->get_parameter("controller.corridor_preview_time").as_double();
+        tcfg.corridor_speed = this->get_parameter("controller.corridor_speed").as_double();
+        tcfg.corridor_align_speed = this->get_parameter("controller.corridor_align_speed").as_double();
+        tcfg.corridor_align_tol =
+            this->get_parameter("controller.corridor_align_tol_deg").as_double() * M_PI / 180.0;
+        tcfg.corridor_lookahead = this->get_parameter("controller.corridor_lookahead").as_double();
+        tcfg.slope_enter_rad =
+            this->get_parameter("controller.slope_enter_deg").as_double() * M_PI / 180.0;
+        tcfg.slope_exit_rad =
+            this->get_parameter("controller.slope_exit_deg").as_double() * M_PI / 180.0;
         tcfg.yaw_align_kp = this->get_parameter("controller.yaw_align_kp").as_double();
+        tcfg.max_align_wz = this->get_parameter("controller.max_align_wz").as_double();
         tcfg.mpc_horizon = this->get_parameter("mpc.horizon").as_int();
         tcfg.mpc_q_pos = this->get_parameter("mpc.q_pos").as_double();
         tcfg.mpc_q_vel = this->get_parameter("mpc.q_vel").as_double();
@@ -162,6 +183,13 @@ public:
                 double qw = msg->pose.pose.orientation.w;
                 double qz = msg->pose.pose.orientation.z;
                 current_yaw_ = 2.0 * atan2(qz, qw);
+
+                // 机身倾角 = 体轴 z 与世界 z 夹角（坡道模式检测用）。
+                // R(2,2) = 1 - 2(qx² + qy²)，只含横滚/俯仰，与 yaw 无关
+                double qx = msg->pose.pose.orientation.x;
+                double qy = msg->pose.pose.orientation.y;
+                double r22 = 1.0 - 2.0 * (qx * qx + qy * qy);
+                current_tilt_ = acos(std::clamp(r22, -1.0, 1.0));
 
                 // 速度反馈：优先用 ESKF twist（REP 105: base_link 系，旋转到 odom 系），
                 // 供 A* 起点速度与 MPC 状态反馈使用。twist 恒为零（旧版 LIO 未填）
@@ -568,9 +596,12 @@ private:
             if (snap)
             {
                 double elapsed = (this->now() - snap->start_time).seconds();
-                cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
+                cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_, current_tilt_,
                                        snap->traj, elapsed, true);
-                if (state_ == FsmState::SLOWDOWN)
+                // 对齐模式下不再乘 slowdown_factor：warn 阈值按自转扫掠圆
+                // (半对角线) 标定，对齐直行的有效半宽更小，且模式本身已是
+                // 恒低速；再乘 0.4 就是把窄道压成蠕动。hard/BRAKE 不受影响。
+                if (state_ == FsmState::SLOWDOWN && !tracker_.inAlignMode())
                 {
                     cmd.linear.x *= slowdown_factor_;
                     cmd.linear.y *= slowdown_factor_;
@@ -580,11 +611,21 @@ private:
             [[fallthrough]];  // 快照已失效：退回无轨迹行为
 
         case FsmState::IDLE:
-            cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
+            cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_, current_tilt_,
                                    empty_traj_, 0.0, false);
             break;
         }
         cmd_vel_pub_->publish(cmd);
+
+        // 对齐模式切换日志（量化验证用：grep "Align mode"）
+        if (tracker_.inAlignMode() != align_mode_prev_)
+        {
+            align_mode_prev_ = tracker_.inAlignMode();
+            RCLCPP_INFO(this->get_logger(), "Align mode %s (narrow=%d slope=%d tilt=%.1fdeg)",
+                        align_mode_prev_ ? "ON" : "off",
+                        tracker_.inNarrowMode(), tracker_.inSlopeMode(),
+                        current_tilt_ * 180.0 / M_PI);
+        }
 
         // 卡滞检测（本体感知）：指令在动而车没动 → 被雷达扫不到的小坎/异物顶住。
         // 感知层对低矮障碍与负障碍天然盲，唯一可靠信号就是"推不动"本身。
@@ -674,6 +715,8 @@ private:
     Eigen::Vector2d current_pos_ = Eigen::Vector2d::Zero();
     Eigen::Vector2d current_vel_ = Eigen::Vector2d::Zero();
     double current_yaw_ = 0.0;
+    double current_tilt_ = 0.0;
+    bool align_mode_prev_ = false;
     bool has_odom_ = false;
     Eigen::Vector2d last_odom_pos_ = Eigen::Vector2d::Zero();
     double last_odom_time_ = -1.0;

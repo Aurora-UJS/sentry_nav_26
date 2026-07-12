@@ -65,6 +65,18 @@ if(BUILD_TESTING)
   )
   ament_target_dependencies(test_safety_monitor plan_env)
   target_link_libraries(test_safety_monitor ${NLOPT_LIBRARIES})
+
+  ament_add_gtest(test_trajectory_tracker
+    test/test_trajectory_tracker.cpp
+    src/trajectory_tracker.cpp
+    src/minco_trajectory.cpp
+  )
+  target_include_directories(test_trajectory_tracker PRIVATE
+    ${EIGEN3_INCLUDE_DIRS} ${NLOPT_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  ament_target_dependencies(test_trajectory_tracker plan_env geometry_msgs)
+  target_link_libraries(test_trajectory_tracker ${NLOPT_LIBRARIES})
 endif()
 
 ament_package()

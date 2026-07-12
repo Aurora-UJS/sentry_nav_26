@@ -65,8 +65,23 @@ sentry_local_planner:
       # （真车=电控 MCU）用高频陀螺 yaw 旋转到机体系。诊断实测：自转 3 rad/s 下
       # LIO yaw 有 ~50-70ms 龄期 (12~21° 误差)，在 50Hz 侧用它旋转会引入方向偏差。
       cmd_frame: "world"           # "world" | "body"(旧行为，直接发 /cmd_vel)
-      narrow_passage_dist: 0.5     # ESDF 距离 < 此值时停止自转，切换为航向对齐 (m)
-      yaw_align_kp: 3.0            # 窄口航向对齐 P 增益
+      # --- 窄道/坡道对齐模式 ---
+      # 前瞻 min-ESDF 或机身倾角触发（带迟滞）：停自转、航向对齐轨迹方向
+      # (车头或���尾，不侧行)、纯追踪恒低速直穿。纯追踪按几何弧长取前瞻点，
+      # 与时间参考脱钩，重规划重置参考速度不影响它（常规 MPC 会被打回起步段）。
+      # 该模式下 SLOWDOWN 不再乘 0.4：warn 阈值按自转扫掠圆(半对角线)标定，
+      # 对齐直行的有效半宽更小，模式本身已是恒低速。
+      corridor_enter_dist: 0.55    # 当前+前瞻 min esdf < 此值 → 进入 (m)
+      corridor_exit_dist: 0.80     # min esdf > 此值 → 退出（迟滞防振荡）
+      corridor_preview_time: 1.2   # 沿轨迹前瞻时长 (s)：进窄口前就完成对齐
+      corridor_speed: 0.8          # 对齐后恒速直穿 (m/s)
+      corridor_align_speed: 0.2    # 未对齐时爬行速度（斜着冲窄口=加宽自己）
+      corridor_align_tol_deg: 20.0 # 航向误差小于此值视为已对齐
+      corridor_lookahead: 0.6      # 纯追踪前瞻弧长 (m)
+      slope_enter_deg: 7.0         # 倾角 > 此值 → 坡道模式（坡上自转有侧翻风险）
+      slope_exit_deg: 4.0          # 倾角 < 此值退出
+      yaw_align_kp: 3.0            # 航向对齐 P 增益
+      max_align_wz: 2.5            # 对齐角速度上限 (rad/s)
 
     # --- MPC 参数 ---
     mpc:

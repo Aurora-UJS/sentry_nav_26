@@ -1,4 +1,5 @@
 #include <sentry_local_planner/trajectory_tracker.hpp>
+#include <algorithm>
 #include <cmath>
 
 namespace sentry_planner
@@ -21,18 +22,27 @@ void TrajectoryTracker::init(const Config &cfg, sentry_nav::EnvironmentInterface
 }
 
 geometry_msgs::msg::Twist TrajectoryTracker::compute(
-    const Eigen::Vector2d &pos, const Eigen::Vector2d &vel, double yaw,
+    const Eigen::Vector2d &pos, const Eigen::Vector2d &vel, double yaw, double tilt,
     const MincoTrajectory &traj, double elapsed, bool has_traj)
 {
     geometry_msgs::msg::Twist cmd;
 
     if (!has_traj)
     {
-        cmd.angular.z = cfg_.spin_rate;
+        // 无轨迹搜索自转 —— 但坡上自转有侧翻风险，贴墙自转会扫墙，都禁止
+        slope_on_ = slope_on_ ? (tilt > cfg_.slope_exit_rad) : (tilt > cfg_.slope_enter_rad);
+        bool near_wall = env_ && env_->isInMap(pos) &&
+                         env_->getDistance(pos) < cfg_.corridor_exit_dist;
+        cmd.angular.z = (slope_on_ || near_wall) ? 0.0 : cfg_.spin_rate;
         return cmd;
     }
 
-    // MPC
+    updateMode(pos, tilt, traj, elapsed);
+
+    if (narrow_on_ || slope_on_)
+        return computeAlignCmd(pos, yaw, traj, elapsed);
+
+    // --- 常规模式: MPC + 自转 ---
     auto ref_func = [&traj](double t) -> Eigen::Vector4d {
         Eigen::Vector4d ref;
         ref.head(2) = traj.getPosition(t);
@@ -62,37 +72,99 @@ geometry_msgs::msg::Twist TrajectoryTracker::compute(
         cmd.linear.x = cy * vel_cmd_odom(0) - sy * vel_cmd_odom(1);
         cmd.linear.y = sy * vel_cmd_odom(0) + cy * vel_cmd_odom(1);
     }
-    cmd.angular.z = computeAngularVelocity(pos, yaw, traj, elapsed);
+    cmd.angular.z = cfg_.spin_rate;
 
     return cmd;
 }
 
-double TrajectoryTracker::computeAngularVelocity(
+void TrajectoryTracker::updateMode(const Eigen::Vector2d &pos, double tilt,
+                                   const MincoTrajectory &traj, double elapsed)
+{
+    slope_on_ = slope_on_ ? (tilt > cfg_.slope_exit_rad) : (tilt > cfg_.slope_enter_rad);
+
+    if (!env_)
+    {
+        narrow_on_ = false;
+        return;
+    }
+
+    // 当前位置 + 轨迹前方 preview_time 采样的最小 ESDF（出地图按 0 处理）
+    double dmin = env_->isInMap(pos) ? env_->getDistance(pos) : 0.0;
+    double t_end = std::min(elapsed + cfg_.corridor_preview_time, traj.getDuration());
+    for (double t = std::max(elapsed, 0.0); t <= t_end; t += 0.1)
+    {
+        Eigen::Vector2d p = traj.getPosition(t);
+        double d = env_->isInMap(p) ? env_->getDistance(p) : 0.0;
+        dmin = std::min(dmin, d);
+    }
+    narrow_on_ = narrow_on_ ? (dmin < cfg_.corridor_exit_dist)
+                            : (dmin < cfg_.corridor_enter_dist);
+}
+
+geometry_msgs::msg::Twist TrajectoryTracker::computeAlignCmd(
     const Eigen::Vector2d &pos, double yaw,
     const MincoTrajectory &traj, double elapsed)
 {
-    if (env_ && env_->isInMap(pos))
+    geometry_msgs::msg::Twist cmd;
+    const double dur = traj.getDuration();
+    const double kStep = 0.05;
+
+    // 最近点: 在 elapsed 邻域内搜索（恒速与时间参考脱钩后 elapsed 会漂，
+    // 但重规划的偏差触发 (0.5m) 保证漂移有界，邻域覆盖它）
+    double t0 = std::clamp(elapsed - 0.5, 0.0, dur);
+    double t1 = std::min(elapsed + 2.0, dur);
+    double t_near = t0, best = 1e18;
+    for (double t = t0; t <= t1; t += kStep)
     {
-        double center_dist = env_->getDistance(pos);
-        if (center_dist < cfg_.narrow_passage_dist)
-        {
-            Eigen::Vector2d vel_dir = traj.getVelocity(elapsed);
-            if (vel_dir.norm() > 0.3)
-            {
-                double desired_yaw = atan2(vel_dir(1), vel_dir(0));
-                double yaw_err = desired_yaw - yaw;
-                while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
-                while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
-
-                if (yaw_err > M_PI / 2.0) yaw_err -= M_PI;
-                else if (yaw_err < -M_PI / 2.0) yaw_err += M_PI;
-
-                return cfg_.yaw_align_kp * yaw_err;
-            }
-            return 0.0;
-        }
+        double d2 = (traj.getPosition(t) - pos).squaredNorm();
+        if (d2 < best) { best = d2; t_near = t; }
     }
-    return cfg_.spin_rate;
+
+    // 前瞻点: 从最近点沿轨迹向前累计弧长 corridor_lookahead
+    Eigen::Vector2d prev = traj.getPosition(t_near), lk = prev;
+    double s = 0.0;
+    for (double t = t_near + kStep; t <= dur && s < cfg_.corridor_lookahead; t += kStep)
+    {
+        Eigen::Vector2d p = traj.getPosition(t);
+        s += (p - prev).norm();
+        prev = p;
+        lk = p;
+    }
+
+    Eigen::Vector2d dir = lk - pos;
+    if (dir.norm() < 0.05)
+        return cmd;  // 已贴近轨迹末端: 停车等下一条轨迹
+    dir.normalize();
+
+    // 航向对齐: 折到 [-π/2, π/2] —— 车头或车尾对齐皆可（前后对称），不侧行
+    double desired_yaw = atan2(dir(1), dir(0));
+    double yaw_err = desired_yaw - yaw;
+    while (yaw_err > M_PI) yaw_err -= 2.0 * M_PI;
+    while (yaw_err < -M_PI) yaw_err += 2.0 * M_PI;
+    if (yaw_err > M_PI / 2.0) yaw_err -= M_PI;
+    else if (yaw_err < -M_PI / 2.0) yaw_err += M_PI;
+
+    cmd.angular.z = std::clamp(cfg_.yaw_align_kp * yaw_err,
+                               -cfg_.max_align_wz, cfg_.max_align_wz);
+
+    // 对齐后恒速直穿；未对齐先爬行转向（斜着冲窄口等于加宽自己）
+    double speed = std::fabs(yaw_err) < cfg_.corridor_align_tol
+                       ? cfg_.corridor_speed
+                       : cfg_.corridor_align_speed;
+    Eigen::Vector2d v = dir * speed;
+
+    if (cfg_.world_frame_cmd)
+    {
+        cmd.linear.x = v(0);
+        cmd.linear.y = v(1);
+    }
+    else
+    {
+        double cy = cos(-yaw), sy = sin(-yaw);
+        cmd.linear.x = cy * v(0) - sy * v(1);
+        cmd.linear.y = sy * v(0) + cy * v(1);
+    }
+    return cmd;
 }
 
 } // namespace sentry_planner
