@@ -21,7 +21,7 @@ sentry_local_planner:
       map_size_y: 30.0
       resolusion_: 0.05             # 5cm 分辨率 (600x600=360K 格子)
       obstacles_inflation: 0.05     # 仅做地图噪声平滑，车体安全由 footprint 检测负责
-      max_slope_deg: 17.0           # 最大可通行坡度 17° (RMUC 赛场 15° + 余量)
+      max_slope_deg: 30.0           # 最大可通行坡度 (对齐 rose；放行堡垒凸起等 <=30° 斜面，墙面 |n.z|≈0 仍成障)
       local_map_margin: 10
       local_update_range_x: 8.0     # 局部更新范围 8m
       local_update_range_y: 8.0
@@ -48,6 +48,9 @@ sentry_local_planner:
       allocate_num: 100000
       check_num: 50
       robot_radius: 0.3            # 车体半径，footprint 碰撞检测用
+      w_clearance: 20.0            # 靠近障碍软惩罚权重：有余地时选宽敞走廊 (rose clearance_weight 思想)
+      clearance_dist: 0.5          # 期望间隙 (m)，esdf 低于它开始加代价
+      start_ignore_radius: 0.35    # A* 起点豁免半径: 贴墙被 BRAKE 后仍能规划驶出路径，防死锁
 
     # --- 模式选择 ---
     planner_mode: "minco"          # "bspline" | "minco"
@@ -106,6 +109,17 @@ sentry_local_planner:
       deviation: 0.5              # 跟踪偏差超此值 → 从实测状态重锚 (m)
       refresh_period: 1.0         # 周期性提质刷新间隔 (s)
       plan_lead: 0.15             # 续接点前瞻量 (s)，覆盖一次规划耗时
+      goal_clearance: 0.45        # 局部目标最小 ESDF 间隙 (m)：钉在墙皮上的 pursuit 点先推开再给 A*
+      jps_lookahead: 2.5          # JPS 路径加密跟随: 局部目标取路径前方此弧长处 (m)。
+                                  # 局部图看不见坑/跌落(负障碍)，稀疏 waypoint 间自由规划会抄近路
+                                  # 穿过先验图才知道的坑(实测卡死)；贴 JPS 路径走则没有抄近路空间
+
+    # --- 卡滞检测（本体感知脱困） ---
+    # 雷达扫不到的小坎/低矮异物顶住车时，"指令在动而车没动"是唯一可靠信号。
+    # 处置: 受阻方向注入虚拟障碍块 → A* 侧移绕行；occ_timeout 让它自动过期(误判自愈)
+    stuck:
+      timeout: 0.8                # 持续推不动多久判卡滞 (s)
+      inject_dist: 0.5            # 虚拟障碍块中心距车距离 (m)
 
     # --- 执行中轨迹安全监控 (50Hz 控制回路内) ---
     # 阈值必须低于规划器的验收标准 (MINCO footprint esdf>=dist0，贴墙时中心
@@ -127,7 +141,7 @@ sentry_local_planner:
       lambda_col: 8.0              # 碰撞代价权重 (与 bspline 对齐)
       lambda_feas: 0.001           # 动力学可行性惩罚
       robot_radius: 0.3            # 车体半径，用于 footprint 碰撞检测
-      dist0: 0.05                  # ESDF 安全阈值：footprint 点距墙小于此值才产生代价（小值，安全由 robot_radius 保证）
+      dist0: 0.30                  # ESDF 软间隙：footprint 点距障碍低于此值产生代价 — 有余地时轨迹主动留 0.3m 余量，窄道软约束仍可贴近 (原 0.05 等于无间隙偏好)
       num_samples: 8               # 每段采样点数
       max_iter: 200                # L-BFGS 最大迭代次数
       max_time_ms: 20.0            # 最大优化时间 (ms)

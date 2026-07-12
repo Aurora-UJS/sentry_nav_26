@@ -138,9 +138,20 @@ public:
         this->declare_parameter<double>("replan.deviation", 0.5);
         this->declare_parameter<double>("replan.refresh_period", 1.0);
         this->declare_parameter<double>("replan.plan_lead", 0.15);
+        this->declare_parameter<double>("replan.jps_lookahead", 2.5);
+        this->declare_parameter<double>("replan.goal_clearance", 0.45);
         replan_deviation_      = this->get_parameter("replan.deviation").as_double();
         replan_refresh_period_ = this->get_parameter("replan.refresh_period").as_double();
         replan_plan_lead_      = this->get_parameter("replan.plan_lead").as_double();
+        jps_lookahead_         = this->get_parameter("replan.jps_lookahead").as_double();
+        goal_clearance_        = this->get_parameter("replan.goal_clearance").as_double();
+
+        // --- 卡滞检测参数 ---
+        this->declare_parameter<double>("stuck.timeout", 0.8);
+        this->declare_parameter<double>("stuck.inject_dist", 0.5);
+        stuck_timeout_     = this->get_parameter("stuck.timeout").as_double();
+        stuck_inject_dist_ = this->get_parameter("stuck.inject_dist").as_double();
+        world_frame_cmd_   = tcfg.world_frame_cmd;
 
         // --- Subscribers ---
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -190,7 +201,6 @@ public:
                 global_waypoints_.clear();
                 for (auto &pose : msg->poses)
                     global_waypoints_.emplace_back(pose.pose.position.x, pose.pose.position.y);
-                current_waypoint_idx_ = 0;
                 has_global_path_ = !global_waypoints_.empty();
                 RCLCPP_INFO(this->get_logger(), "Received global path: %zu waypoints",
                             global_waypoints_.size());
@@ -274,7 +284,55 @@ private:
         if (!has_odom_) { RCLCPP_WARN(this->get_logger(), "No odom yet"); return; }
         final_goal_ = Eigen::Vector2d(msg->pose.position.x, msg->pose.position.y);
         has_final_goal_ = true;
-        dispatchPlanResult(planToGoal(final_goal_));
+        // 旧目标的全局路径立即作废，等全局规划器发新路径（否则沿旧路走会静默偏航）
+        has_global_path_ = false;
+        global_waypoints_.clear();
+        if ((final_goal_ - current_pos_).norm() <= 2.0 * jps_lookahead_)
+            dispatchPlanResult(planToGoal(final_goal_));
+        else
+        {
+            // 远目标不直接规划（先验图之外的坑/封闭区只有 JPS 知道）：
+            // 丢弃朝旧目标的轨迹，由 replanCallback 在收到全局路径后接管
+            setActiveTraj(nullptr);
+            dispatch(FsmEvent::TRAJ_FINISHED);
+            RCLCPP_INFO(this->get_logger(), "Far goal (%.1fm), waiting for global path",
+                        (final_goal_ - current_pos_).norm());
+        }
+    }
+
+    /**
+     * 路径弧长前瞻点：取 path 上距 p 最近点前方 lookahead 弧长处（段内插值）。
+     * 用于 JPS 路径加密跟随 —— 局部规划只做短途避障，不在稀疏 waypoint 间
+     * 长距自由规划。点云局部图看不见坑/跌落等负障碍，抄近路会直接掉进
+     * 只有先验图才知道的坑里（实测卡死）；JPS 在先验图上避坑，贴着它走
+     * 局部层就没有抄近路的空间。
+     */
+    static Eigen::Vector2d pursuitPointOnPath(const std::vector<Eigen::Vector2d> &path,
+                                              const Eigen::Vector2d &p, double lookahead)
+    {
+        double best_d2 = std::numeric_limits<double>::max();
+        int best_i = 0;
+        double best_t = 0.0;
+        for (int i = 0; i + 1 < (int)path.size(); ++i)
+        {
+            Eigen::Vector2d ab = path[i + 1] - path[i];
+            double L2 = ab.squaredNorm();
+            double t = L2 < 1e-12 ? 0.0 : std::clamp((p - path[i]).dot(ab) / L2, 0.0, 1.0);
+            double d2 = (path[i] + t * ab - p).squaredNorm();
+            if (d2 < best_d2) { best_d2 = d2; best_i = i; best_t = t; }
+        }
+        Eigen::Vector2d cur = path[best_i] + best_t * (path[best_i + 1] - path[best_i]);
+        double remain = lookahead;
+        for (int i = best_i; i + 1 < (int)path.size(); ++i)
+        {
+            Eigen::Vector2d a = (i == best_i) ? cur : path[i];
+            Eigen::Vector2d seg = path[i + 1] - a;
+            double len = seg.norm();
+            if (len >= remain)
+                return a + seg / len * remain;
+            remain -= len;
+        }
+        return path.back();
     }
 
     void dispatchPlanResult(PlanResult res)
@@ -308,6 +366,26 @@ private:
         sdf_map_->getRegion(map_origin, map_size);
         for (int i = 0; i < 2; ++i)
             goal_pt(i) = std::clamp(goal_pt(i), map_origin(i) + 0.5, map_origin(i) + map_size(i) - 0.5);
+
+        // 局部目标推离障碍：pursuit 点沿贴墙的全局路径取时可能钉在墙皮/膨胀区里
+        // （先验图间隙够、局部图更紧），A* 对不可达目标反复失败 → 原地蠕动。
+        // 沿局部 ESDF 数值梯度推到 goal_clearance 再交给 A*。
+        {
+            const double res = sdf_map_->getResolution();
+            for (int iter = 0; iter < 20; ++iter)
+            {
+                if (sdf_map_->getDistance(goal_pt) >= goal_clearance_)
+                    break;
+                Eigen::Vector2d grad(
+                    sdf_map_->getDistance(goal_pt + Eigen::Vector2d(res, 0)) -
+                        sdf_map_->getDistance(goal_pt - Eigen::Vector2d(res, 0)),
+                    sdf_map_->getDistance(goal_pt + Eigen::Vector2d(0, res)) -
+                        sdf_map_->getDistance(goal_pt - Eigen::Vector2d(0, res)));
+                if (grad.norm() < 1e-6)
+                    break;
+                goal_pt += grad.normalized() * res;
+            }
+        }
 
         // 起点状态：执行中且跟踪良好时，从当前轨迹的参考点 (elapsed + lead) 续接，
         // 而不是从实测状态重启 —— 否则每次重规划都把参考速度打回起步段，
@@ -374,12 +452,17 @@ private:
         if ((final_goal_ - current_pos_).norm() < 1.0) return;
 
         Eigen::Vector2d local_goal = final_goal_;
-        if (has_global_path_ && !global_waypoints_.empty())
+        if (has_global_path_ && global_waypoints_.size() >= 2)
+            local_goal = pursuitPointOnPath(global_waypoints_, current_pos_, jps_lookahead_);
+        else if ((final_goal_ - current_pos_).norm() > 2.0 * jps_lookahead_)
         {
-            while (current_waypoint_idx_ < (int)global_waypoints_.size() - 1 &&
-                   (global_waypoints_[current_waypoint_idx_] - current_pos_).norm() < 1.0)
-                current_waypoint_idx_++;
-            local_goal = global_waypoints_[current_waypoint_idx_];
+            // 远目标必须有全局路径兜底：先验图知道坑/跌落/封闭区，局部点云图
+            // 不知道。JPS 未出路径（未达/不可达）时不做长距自由规划，原地等待。
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Far goal (%.1fm) without global path - waiting for JPS "
+                                 "(unreachable in prior map?)",
+                                 (final_goal_ - current_pos_).norm());
+            return;
         }
 
         // 按需重规划，而不是每拍无条件全量重规划（借鉴 rose 的局部性思想）：
@@ -502,6 +585,42 @@ private:
             break;
         }
         cmd_vel_pub_->publish(cmd);
+
+        // 卡滞检测（本体感知）：指令在动而车没动 → 被雷达扫不到的小坎/异物顶住。
+        // 感知层对低矮障碍与负障碍天然盲，唯一可靠信号就是"推不动"本身。
+        // 处置：在受阻方向注入虚拟障碍块 → A* 自然侧移绕行；occ_timeout 自动过期。
+        if (state_ == FsmState::EXEC || state_ == FsmState::SLOWDOWN)
+        {
+            double cmd_norm = std::hypot(cmd.linear.x, cmd.linear.y);
+            if (cmd_norm > 0.15 && current_vel_.norm() < 0.08)
+            {
+                if (stuck_since_.nanoseconds() == 0)
+                    stuck_since_ = this->now();
+                else if ((this->now() - stuck_since_).seconds() > stuck_timeout_ &&
+                         (this->now() - last_stuck_inject_).seconds() > 1.0)
+                {
+                    // cmd_frame=world 时 cmd.linear 即 odom 系；body 模式旋转回 odom 系
+                    Eigen::Vector2d dir(cmd.linear.x, cmd.linear.y);
+                    if (!world_frame_cmd_)
+                    {
+                        double c = std::cos(current_yaw_), s = std::sin(current_yaw_);
+                        dir = Eigen::Vector2d(c * dir(0) - s * dir(1), s * dir(0) + c * dir(1));
+                    }
+                    Eigen::Vector2d ob = current_pos_ + dir.normalized() * stuck_inject_dist_;
+                    sdf_map_->getCore().addVirtualObstacle(ob, 0.15, this->now().seconds());
+                    RCLCPP_WARN(this->get_logger(),
+                                "Stuck: cmd %.2f m/s but vel %.2f m/s for %.1fs - "
+                                "inject virtual obstacle at (%.2f, %.2f) to sidestep",
+                                cmd_norm, current_vel_.norm(), stuck_timeout_, ob(0), ob(1));
+                    last_stuck_inject_ = this->now();
+                    stuck_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+                }
+            }
+            else
+                stuck_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+        }
+        else
+            stuck_since_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
     }
 
     void publishTrajectory(const sentry_planner::MincoTrajectory &traj, double duration)
@@ -564,6 +683,15 @@ private:
     double replan_deviation_ = 0.5;
     double replan_refresh_period_ = 1.0;
     double replan_plan_lead_ = 0.15;
+    double jps_lookahead_ = 2.5;
+    double goal_clearance_ = 0.45;
+
+    // 卡滞检测（本体感知脱困）
+    double stuck_timeout_ = 0.8;
+    double stuck_inject_dist_ = 0.5;
+    bool world_frame_cmd_ = false;
+    rclcpp::Time stuck_since_{0, 0, RCL_ROS_TIME};
+    rclcpp::Time last_stuck_inject_{0, 0, RCL_ROS_TIME};
     rclcpp::Time last_plan_time_{0, 0, RCL_ROS_TIME};
     Eigen::Vector2d last_planned_goal_ = Eigen::Vector2d::Constant(1e9);
 
@@ -588,7 +716,6 @@ private:
     bool has_final_goal_ = false;
 
     std::vector<Eigen::Vector2d> global_waypoints_;
-    int current_waypoint_idx_ = 0;
     bool has_global_path_ = false;
 
     // ROS
