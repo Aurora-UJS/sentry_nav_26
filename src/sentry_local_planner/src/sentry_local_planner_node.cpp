@@ -134,6 +134,14 @@ public:
         slowdown_factor_      = this->get_parameter("safety.slowdown_factor").as_double();
         brake_timeout_        = this->get_parameter("safety.brake_timeout").as_double();
 
+        // --- 按需重规划参数 ---
+        this->declare_parameter<double>("replan.deviation", 0.5);
+        this->declare_parameter<double>("replan.refresh_period", 1.0);
+        this->declare_parameter<double>("replan.plan_lead", 0.15);
+        replan_deviation_      = this->get_parameter("replan.deviation").as_double();
+        replan_refresh_period_ = this->get_parameter("replan.refresh_period").as_double();
+        replan_plan_lead_      = this->get_parameter("replan.plan_lead").as_double();
+
         // --- Subscribers ---
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/Odometry", 10,
@@ -144,10 +152,21 @@ public:
                 double qz = msg->pose.pose.orientation.z;
                 current_yaw_ = 2.0 * atan2(qz, qw);
 
-                // small_point_lio 的 twist 未实现（恒为零），用位姿差分 + 低通
-                // 估计 odom 系速度，供 A* 起点速度与 MPC 状态反馈使用
+                // 速度反馈：优先用 ESKF twist（REP 105: base_link 系，旋转到 odom 系），
+                // 供 A* 起点速度与 MPC 状态反馈使用。twist 恒为零（旧版 LIO 未填）
+                // 时退回位姿差分 + 低通。
+                Eigen::Vector2d v_body(msg->twist.twist.linear.x, msg->twist.twist.linear.y);
                 double t = rclcpp::Time(msg->header.stamp).seconds();
-                if (last_odom_time_ > 0.0)
+                if (v_body.squaredNorm() > 1e-12 || twist_seen_)
+                {
+                    twist_seen_ = true;
+                    Eigen::Quaterniond q(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
+                                         msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
+                    Eigen::Vector3d v_odom = q * Eigen::Vector3d(v_body(0), v_body(1),
+                                                                 msg->twist.twist.linear.z);
+                    current_vel_ = v_odom.head<2>();
+                }
+                else if (last_odom_time_ > 0.0)
                 {
                     double dt = t - last_odom_time_;
                     if (dt > 1e-4 && dt < 0.5)
@@ -290,9 +309,32 @@ private:
         for (int i = 0; i < 2; ++i)
             goal_pt(i) = std::clamp(goal_pt(i), map_origin(i) + 0.5, map_origin(i) + map_size(i) - 0.5);
 
+        // 起点状态：执行中且跟踪良好时，从当前轨迹的参考点 (elapsed + lead) 续接，
+        // 而不是从实测状态重启 —— 否则每次重规划都把参考速度打回起步段，
+        // 10Hz 重规划下参考速度永远爬不上去（实测 5.4m 直线平均有效速度仅 0.27m/s）。
+        // 跟踪偏差过大时回退到实测状态重锚（MPC 已跟不上参考，续接无意义）。
+        Eigen::Vector2d start_pos = current_pos_;
+        Eigen::Vector2d start_vel = current_vel_;
+        Eigen::Vector2d start_acc = Eigen::Vector2d::Zero();
+        rclcpp::Time traj_t0 = this->now();
+        auto prev = getActiveTraj();
+        if (prev && (state_ == FsmState::EXEC || state_ == FsmState::SLOWDOWN))
+        {
+            double elapsed = (this->now() - prev->start_time).seconds();
+            double t_ref = std::min(elapsed + replan_plan_lead_, prev->duration);
+            Eigen::Vector2d p_ref = prev->traj.getPosition(t_ref);
+            if ((p_ref - current_pos_).norm() < replan_deviation_)
+            {
+                start_pos = p_ref;
+                start_vel = prev->traj.getVelocity(t_ref);
+                start_acc = prev->traj.getAcceleration(t_ref);
+                traj_t0 = prev->start_time + rclcpp::Duration::from_seconds(t_ref);
+            }
+        }
+
         // A*
         kino_astar_->reset();
-        int result = kino_astar_->search(current_pos_, current_vel_, Eigen::Vector2d::Zero(),
+        int result = kino_astar_->search(start_pos, start_vel, start_acc,
                                           goal_pt, Eigen::Vector2d::Zero(), true);
         if (result == KinodynamicAstar::NO_PATH) return PlanResult::FAILED;
 
@@ -306,9 +348,9 @@ private:
         this->get_parameter("search.max_vel", max_vel);
         this->get_parameter("search.max_acc", max_acc);
 
-        Eigen::Vector2d sv = start_end_derivatives.size() >= 2 ? start_end_derivatives[0] : current_vel_;
+        Eigen::Vector2d sv = start_end_derivatives.size() >= 2 ? start_end_derivatives[0] : start_vel;
         Eigen::Vector2d ev = start_end_derivatives.size() >= 2 ? start_end_derivatives[1] : Eigen::Vector2d::Zero();
-        Eigen::Vector2d sa = start_end_derivatives.size() >= 4 ? start_end_derivatives[2] : Eigen::Vector2d::Zero();
+        Eigen::Vector2d sa = start_end_derivatives.size() >= 4 ? start_end_derivatives[2] : start_acc;
         Eigen::Vector2d ea = start_end_derivatives.size() >= 4 ? start_end_derivatives[3] : Eigen::Vector2d::Zero();
 
         minco_traj_.setup(point_set, sv, sa, ev, ea, max_vel, max_acc, this->now().seconds());
@@ -316,10 +358,12 @@ private:
 
         auto snap = std::make_shared<TrajSnapshot>();
         snap->traj = minco_traj_;  // 值拷贝进只读快照，工作对象后续改写不影响控制回路
-        snap->start_time = this->now();
+        snap->start_time = traj_t0;
         snap->duration = minco_traj_.getDuration();
         setActiveTraj(snap);
 
+        last_plan_time_ = this->now();
+        last_planned_goal_ = goal_pt;
         publishTrajectory(snap->traj, snap->duration);
         return PlanResult::SUCCESS;
     }
@@ -337,7 +381,29 @@ private:
                 current_waypoint_idx_++;
             local_goal = global_waypoints_[current_waypoint_idx_];
         }
-        dispatchPlanResult(planToGoal(local_goal));
+
+        // 按需重规划，而不是每拍无条件全量重规划（借鉴 rose 的局部性思想）：
+        // 正常执行中让轨迹跑完它的加速段，只在以下情况重新规划 —
+        //   无轨迹(IDLE/BRAKE 有目标) / SLOWDOWN(找更好的路) / 跟踪偏差超限(重锚)
+        //   / 目标点移动 / 周期性提质刷新
+        auto snap = getActiveTraj();
+        bool need_replan = false;
+        if (!snap)
+            need_replan = true;
+        else if (state_ == FsmState::SLOWDOWN)
+            need_replan = true;
+        else
+        {
+            double elapsed = (this->now() - snap->start_time).seconds();
+            double deviation =
+                (snap->traj.getPosition(std::min(elapsed, snap->duration)) - current_pos_).norm();
+            need_replan = deviation > replan_deviation_ ||
+                          (local_goal - last_planned_goal_).norm() > 0.3 ||
+                          (this->now() - last_plan_time_).seconds() > replan_refresh_period_;
+        }
+
+        if (need_replan)
+            dispatchPlanResult(planToGoal(local_goal));
     }
 
     void controlLoop()
@@ -375,9 +441,11 @@ private:
 
                 if (chk.hard())
                 {
+                    Eigen::Vector2d hp = snap->traj.getPosition(chk.first_hard_time);
                     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                                         "Traj hits obstacle in %.2fs (min esdf %.2fm)",
-                                         chk.first_hard_time - elapsed, chk.min_distance);
+                                         "Traj hits obstacle in %.2fs (min esdf %.2fm) at (%.2f, %.2f), robot (%.2f, %.2f)",
+                                         chk.first_hard_time - elapsed, chk.min_distance,
+                                         hp(0), hp(1), current_pos_(0), current_pos_(1));
                     if (chk.first_hard_time - elapsed < safety_imminent_time_)
                         dispatch(FsmEvent::TRAJ_UNSAFE_IMMINENT);
                     else
@@ -490,6 +558,14 @@ private:
     bool has_odom_ = false;
     Eigen::Vector2d last_odom_pos_ = Eigen::Vector2d::Zero();
     double last_odom_time_ = -1.0;
+    bool twist_seen_ = false;  // 收到过非零 twist 后不再退回位姿差分
+
+    // 按需重规划状态
+    double replan_deviation_ = 0.5;
+    double replan_refresh_period_ = 1.0;
+    double replan_plan_lead_ = 0.15;
+    rclcpp::Time last_plan_time_{0, 0, RCL_ROS_TIME};
+    Eigen::Vector2d last_planned_goal_ = Eigen::Vector2d::Constant(1e9);
 
     FsmState state_ = FsmState::IDLE;
     rclcpp::Time unsafe_since_;
