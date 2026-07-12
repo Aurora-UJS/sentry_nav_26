@@ -95,6 +95,20 @@ sentry_local_planner:
     replan:
       frequency: 10.0             # 主动重规划频率 (Hz)，始终保持轨迹最优
 
+    # --- 执行中轨迹安全监控 (50Hz 控制回路内) ---
+    # 阈值必须低于规划器的验收标准 (MINCO footprint esdf>=dist0，贴墙时中心
+    # esdf 合法低到 ~0.28m)，否则监控把规划器的正常输出判为不安全 → 振荡。
+    safety:
+      check_horizon: 2.0          # 前瞻窗口 (s)，覆盖 ~20 个重规划周期
+      check_dt: 0.03              # 采样步长 (s)；max_vel*dt ≈ 0.09m ≲ 2 voxel，防穿墙漏检
+      margin_warn: 0.20           # 软阈值：低于它 → SLOWDOWN (比有意贴墙更近才报)
+      margin_hard: 0.15           # 硬阈值：轨迹真穿障 (~3 voxel)；迫近才 BRAKE
+      exit_hysteresis: 0.05       # 退出 SLOWDOWN 需 min esdf >= warn + 此值，防边界抖动
+      self_ignore_radius: 0.35    # 距当前位置小于此值的采样点跳过：已占据区域不算未来碰撞，贴墙脱困豁免
+      imminent_time: 0.8          # 硬不安全点距今小于此值 → 直接刹停 (3m/s 全减速需 1s/1.5m)
+      slowdown_factor: 0.4        # SLOWDOWN 状态线速度缩放
+      brake_timeout: 0.5          # 硬不安全持续超时仍未修复 → 刹停 (s)，覆盖 ~5 个重规划周期
+
     # --- MINCO 梯度优化参数 ---
     minco_opt:
       lambda_smooth: 0.1           # 平滑权重 (MINCO 天然平滑，比 bspline 小)

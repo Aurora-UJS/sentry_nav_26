@@ -1,5 +1,14 @@
 /**
  * sentry_local_planner_node: Kinodynamic A* + MINCO + MPC
+ *
+ * 执行安全架构（三个时序域解耦）:
+ *   - 50Hz 控制回路: 跟踪 + 执行中轨迹前瞻安全监控（safety_monitor.hpp）
+ *   - 10Hz 重规划: 全量 A* + MINCO，规划失败不丢弃仍安全的旧轨迹
+ *   - 状态机: IDLE/EXEC/SLOWDOWN/BRAKE 纯函数转移（planner_fsm.hpp），
+ *     降级阶梯 EXEC → SLOWDOWN → BRAKE 保证阶梯有底（刹停），不裸奔
+ *
+ * 轨迹以 shared_ptr<const TrajSnapshot> 整体快照交换（轨迹+起始时刻+时长），
+ * 控制回路每拍取一次快照，杜绝规划中途改写轨迹导致的撕裂读取。
  */
 
 #include <rclcpp/rclcpp.hpp>
@@ -10,14 +19,21 @@
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include <memory>
+#include <mutex>
+
 #include <plan_env/sdf_map.hpp>
 #include <plan_env/edt_environment.hpp>
 #include <path_searching/kinodynamic_astar.hpp>
 
 #include <sentry_local_planner/minco_trajectory.hpp>
 #include <sentry_local_planner/trajectory_tracker.hpp>
+#include <sentry_local_planner/planner_fsm.hpp>
+#include <sentry_local_planner/safety_monitor.hpp>
 
 using namespace fast_planner;
+using sentry_planner::FsmEvent;
+using sentry_planner::FsmState;
 
 class SentryLocalPlannerNode : public rclcpp::Node
 {
@@ -91,7 +107,32 @@ public:
         tcfg.mpc_q_pos = this->get_parameter("mpc.q_pos").as_double();
         tcfg.mpc_q_vel = this->get_parameter("mpc.q_vel").as_double();
         tcfg.mpc_r_acc = this->get_parameter("mpc.r_acc").as_double();
+        // world: 输出 odom 系速度到 /cmd_vel_world，由 chassis_cmd_node（真车=电控）
+        // 用高频陀螺 yaw 旋转；body: 旧行为，本节点用 LIO yaw 旋转后直发 /cmd_vel
+        this->declare_parameter<std::string>("controller.cmd_frame", "world");
+        std::string cmd_frame = this->get_parameter("controller.cmd_frame").as_string();
+        tcfg.world_frame_cmd = (cmd_frame == "world");
         tracker_.init(tcfg, edt_env_.get());
+
+        // --- 执行安全监控参数 ---
+        this->declare_parameter<double>("safety.check_horizon", 2.0);
+        this->declare_parameter<double>("safety.check_dt", 0.03);
+        this->declare_parameter<double>("safety.margin_warn", 0.20);
+        this->declare_parameter<double>("safety.margin_hard", 0.15);
+        this->declare_parameter<double>("safety.exit_hysteresis", 0.05);
+        this->declare_parameter<double>("safety.self_ignore_radius", 0.35);
+        this->declare_parameter<double>("safety.imminent_time", 0.8);
+        this->declare_parameter<double>("safety.slowdown_factor", 0.4);
+        this->declare_parameter<double>("safety.brake_timeout", 0.5);
+        safety_check_horizon_ = this->get_parameter("safety.check_horizon").as_double();
+        safety_check_dt_      = this->get_parameter("safety.check_dt").as_double();
+        safety_margin_warn_   = this->get_parameter("safety.margin_warn").as_double();
+        safety_margin_hard_   = this->get_parameter("safety.margin_hard").as_double();
+        safety_exit_hyst_     = this->get_parameter("safety.exit_hysteresis").as_double();
+        safety_self_ignore_r_ = this->get_parameter("safety.self_ignore_radius").as_double();
+        safety_imminent_time_ = this->get_parameter("safety.imminent_time").as_double();
+        slowdown_factor_      = this->get_parameter("safety.slowdown_factor").as_double();
+        brake_timeout_        = this->get_parameter("safety.brake_timeout").as_double();
 
         // --- Subscribers ---
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -99,11 +140,24 @@ public:
             [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
                 current_pos_(0) = msg->pose.pose.position.x;
                 current_pos_(1) = msg->pose.pose.position.y;
-                current_vel_(0) = msg->twist.twist.linear.x;
-                current_vel_(1) = msg->twist.twist.linear.y;
                 double qw = msg->pose.pose.orientation.w;
                 double qz = msg->pose.pose.orientation.z;
                 current_yaw_ = 2.0 * atan2(qz, qw);
+
+                // small_point_lio 的 twist 未实现（恒为零），用位姿差分 + 低通
+                // 估计 odom 系速度，供 A* 起点速度与 MPC 状态反馈使用
+                double t = rclcpp::Time(msg->header.stamp).seconds();
+                if (last_odom_time_ > 0.0)
+                {
+                    double dt = t - last_odom_time_;
+                    if (dt > 1e-4 && dt < 0.5)
+                    {
+                        Eigen::Vector2d v_raw = (current_pos_ - last_odom_pos_) / dt;
+                        current_vel_ = 0.6 * current_vel_ + 0.4 * v_raw;
+                    }
+                }
+                last_odom_pos_ = current_pos_;
+                last_odom_time_ = t;
                 has_odom_ = true;
             });
 
@@ -127,7 +181,8 @@ public:
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/planning/trajectory", 10);
         marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             "/planning/trajectory_markers", 10);
-        cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+        cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
+            tcfg.world_frame_cmd ? "/cmd_vel_world" : "/cmd_vel", 10);
 
         // --- Timers ---
         ctrl_timer_ = this->create_wall_timer(
@@ -140,24 +195,89 @@ public:
             std::chrono::duration<double>(1.0 / replan_freq),
             std::bind(&SentryLocalPlannerNode::replanCallback, this));
 
-        RCLCPP_INFO(this->get_logger(), "Planner initialized: minco+mpc, ctrl@%.0fHz", ctrl_freq);
+        RCLCPP_INFO(this->get_logger(),
+                    "Planner initialized: minco+mpc, ctrl@%.0fHz, safety horizon %.1fs",
+                    ctrl_freq, safety_check_horizon_);
     }
 
 private:
+    /** 轨迹快照：轨迹 + 起始时刻 + 时长整体交换，避免三者被撕裂读取 */
+    struct TrajSnapshot
+    {
+        sentry_planner::MincoTrajectory traj;
+        rclcpp::Time start_time;
+        double duration = 0.0;
+    };
+    using TrajSnapshotPtr = std::shared_ptr<const TrajSnapshot>;
+
+    TrajSnapshotPtr getActiveTraj()
+    {
+        std::lock_guard<std::mutex> lk(traj_mutex_);
+        return active_traj_;
+    }
+    void setActiveTraj(TrajSnapshotPtr snap)
+    {
+        std::lock_guard<std::mutex> lk(traj_mutex_);
+        active_traj_ = std::move(snap);
+    }
+
+    enum class PlanResult { SUCCESS, FAILED, SKIPPED };
+
+    /** 状态机事件分发：转移由纯函数决定，进入新状态的副作用集中在这里 */
+    void dispatch(FsmEvent e)
+    {
+        FsmState next = sentry_planner::fsmTransition(state_, e);
+        if (next == state_)
+            return;
+
+        RCLCPP_INFO(this->get_logger(), "FSM: %s -> %s",
+                    sentry_planner::fsmStateName(state_),
+                    sentry_planner::fsmStateName(next));
+
+        if (next == FsmState::SLOWDOWN && state_ == FsmState::EXEC)
+            unsafe_since_ = this->now();
+
+        if (next == FsmState::BRAKE)
+        {
+            // 刹停即放弃当前轨迹；后续恢复只能靠新的 PLAN_SUCCESS
+            setActiveTraj(nullptr);
+            RCLCPP_WARN(this->get_logger(), "Trajectory dropped, braking");
+        }
+
+        if (next == FsmState::IDLE)
+            setActiveTraj(nullptr);
+
+        state_ = next;
+    }
+
     void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
         if (!has_odom_) { RCLCPP_WARN(this->get_logger(), "No odom yet"); return; }
         final_goal_ = Eigen::Vector2d(msg->pose.position.x, msg->pose.position.y);
         has_final_goal_ = true;
-        planToGoal(final_goal_);
+        dispatchPlanResult(planToGoal(final_goal_));
     }
 
-    void planToGoal(Eigen::Vector2d goal_pt)
+    void dispatchPlanResult(PlanResult res)
+    {
+        if (res == PlanResult::SUCCESS)
+            dispatch(FsmEvent::PLAN_SUCCESS);
+        else if (res == PlanResult::FAILED)
+        {
+            dispatch(FsmEvent::PLAN_FAIL);
+            if (state_ != FsmState::IDLE)
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                     "Replan failed, state=%s",
+                                     sentry_planner::fsmStateName(state_));
+        }
+    }
+
+    PlanResult planToGoal(Eigen::Vector2d goal_pt)
     {
         Eigen::Vector2d diff = goal_pt - current_pos_;
         // A* near_end tolerance = ceil(1/resolution_astar) * resolution_astar ≈ 1.0m
         // 不要在这个范围内重规划，让最后一段轨迹自然执行完
-        if (diff.norm() < 1.0) return;
+        if (diff.norm() < 1.0) return PlanResult::SKIPPED;
 
         double local_range = 7.5;
         this->get_parameter("sdf_map.local_update_range_x", local_range);
@@ -174,12 +294,12 @@ private:
         kino_astar_->reset();
         int result = kino_astar_->search(current_pos_, current_vel_, Eigen::Vector2d::Zero(),
                                           goal_pt, Eigen::Vector2d::Zero(), true);
-        if (result == KinodynamicAstar::NO_PATH) { has_traj_ = false; return; }
+        if (result == KinodynamicAstar::NO_PATH) return PlanResult::FAILED;
 
         double ts;
         std::vector<Eigen::Vector2d> point_set, start_end_derivatives;
         kino_astar_->getSamples(ts, point_set, start_end_derivatives);
-        if (point_set.size() < 2) { has_traj_ = false; return; }
+        if (point_set.size() < 2) return PlanResult::FAILED;
 
         // MINCO
         double max_vel = 3.0, max_acc = 3.0;
@@ -192,10 +312,16 @@ private:
         Eigen::Vector2d ea = start_end_derivatives.size() >= 4 ? start_end_derivatives[3] : Eigen::Vector2d::Zero();
 
         minco_traj_.setup(point_set, sv, sa, ev, ea, max_vel, max_acc, this->now().seconds());
-        traj_duration_ = minco_traj_.getDuration();
-        traj_start_time_ = this->now();
-        has_traj_ = true;
-        publishTrajectory();
+        if (minco_traj_.empty()) return PlanResult::FAILED;
+
+        auto snap = std::make_shared<TrajSnapshot>();
+        snap->traj = minco_traj_;  // 值拷贝进只读快照，工作对象后续改写不影响控制回路
+        snap->start_time = this->now();
+        snap->duration = minco_traj_.getDuration();
+        setActiveTraj(snap);
+
+        publishTrajectory(snap->traj, snap->duration);
+        return PlanResult::SUCCESS;
     }
 
     void replanCallback()
@@ -211,30 +337,106 @@ private:
                 current_waypoint_idx_++;
             local_goal = global_waypoints_[current_waypoint_idx_];
         }
-        planToGoal(local_goal);
+        dispatchPlanResult(planToGoal(local_goal));
     }
 
     void controlLoop()
     {
         if (!has_odom_) return;
 
-        double elapsed = has_traj_ ? (this->now() - traj_start_time_).seconds() : 0.0;
+        auto snap = getActiveTraj();
 
-        if (has_traj_ && elapsed >= traj_duration_)
+        if (snap)
         {
-            has_traj_ = false;
-            if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 1.0) {
-                RCLCPP_INFO(this->get_logger(), "Goal reached!");
-                has_final_goal_ = false;
+            double elapsed = (this->now() - snap->start_time).seconds();
+
+            if (elapsed >= snap->duration)
+            {
+                if (!has_final_goal_ || (final_goal_ - current_pos_).norm() < 1.0)
+                {
+                    RCLCPP_INFO(this->get_logger(), "Goal reached!");
+                    has_final_goal_ = false;
+                    dispatch(FsmEvent::GOAL_REACHED);
+                }
+                else
+                    dispatch(FsmEvent::TRAJ_FINISHED);
+                snap.reset();
+            }
+            else if (state_ == FsmState::EXEC || state_ == FsmState::SLOWDOWN)
+            {
+                // 前瞻安全监控：每拍 ~70 次 O(1) ESDF 查询。
+                // 分级判定：hard（真穿障）才允许升级到 BRAKE；warn（比规划器
+                // 有意的贴墙更近）只降速，避免与规划器验收标准打架产生振荡。
+                double t_end = std::min(elapsed + safety_check_horizon_, snap->duration);
+                auto chk = sentry_planner::checkTrajectorySafety(
+                    *edt_env_, snap->traj, elapsed, t_end, safety_check_dt_,
+                    safety_margin_warn_, safety_margin_hard_,
+                    current_pos_, safety_self_ignore_r_);
+
+                if (chk.hard())
+                {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                                         "Traj hits obstacle in %.2fs (min esdf %.2fm)",
+                                         chk.first_hard_time - elapsed, chk.min_distance);
+                    if (chk.first_hard_time - elapsed < safety_imminent_time_)
+                        dispatch(FsmEvent::TRAJ_UNSAFE_IMMINENT);
+                    else
+                    {
+                        dispatch(FsmEvent::TRAJ_UNSAFE);
+                        if (state_ == FsmState::SLOWDOWN &&
+                            (this->now() - unsafe_since_).seconds() > brake_timeout_)
+                            dispatch(FsmEvent::UNSAFE_TIMEOUT);
+                    }
+                    if (state_ == FsmState::BRAKE)
+                        snap.reset();  // dispatch 已丢弃轨迹
+                }
+                else if (chk.warn())
+                {
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                         "Traj marginal in %.2fs (min esdf %.2fm), slowing",
+                                         chk.first_warn_time - elapsed, chk.min_distance);
+                    // warn 级不超时升级：窄道慢速通过优于趴窝
+                    dispatch(FsmEvent::TRAJ_UNSAFE);
+                    unsafe_since_ = this->now();  // hard 计时器随 warn 刷新
+                }
+                else if (state_ == FsmState::SLOWDOWN &&
+                         chk.min_distance >= safety_margin_warn_ + safety_exit_hyst_)
+                    dispatch(FsmEvent::TRAJ_SAFE);  // 带迟滞退出，防边界抖动
             }
         }
 
-        auto cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
-                                     minco_traj_, elapsed, has_traj_);
+        // 按状态输出控制指令
+        geometry_msgs::msg::Twist cmd;
+        switch (state_)
+        {
+        case FsmState::BRAKE:
+            break;  // 零指令刹停（阶梯的底）
+
+        case FsmState::EXEC:
+        case FsmState::SLOWDOWN:
+            if (snap)
+            {
+                double elapsed = (this->now() - snap->start_time).seconds();
+                cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
+                                       snap->traj, elapsed, true);
+                if (state_ == FsmState::SLOWDOWN)
+                {
+                    cmd.linear.x *= slowdown_factor_;
+                    cmd.linear.y *= slowdown_factor_;
+                }
+                break;
+            }
+            [[fallthrough]];  // 快照已失效：退回无轨迹行为
+
+        case FsmState::IDLE:
+            cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_,
+                                   empty_traj_, 0.0, false);
+            break;
+        }
         cmd_vel_pub_->publish(cmd);
     }
 
-    void publishTrajectory()
+    void publishTrajectory(const sentry_planner::MincoTrajectory &traj, double duration)
     {
         nav_msgs::msg::Path path_msg;
         path_msg.header.stamp = this->now();
@@ -254,9 +456,9 @@ private:
         line.scale.x = 0.08;
         line.color.g = 1.0; line.color.b = 1.0; line.color.a = 1.0;
 
-        for (double t = 0; t <= traj_duration_; t += 0.05)
+        for (double t = 0; t <= duration; t += 0.05)
         {
-            Eigen::Vector2d pt = minco_traj_.getPosition(t);
+            Eigen::Vector2d pt = traj.getPosition(t);
             geometry_msgs::msg::PoseStamped pose;
             pose.header = path_msg.header;
             pose.pose.position.x = pt(0); pose.pose.position.y = pt(1);
@@ -277,7 +479,8 @@ private:
     std::shared_ptr<SDFMap> sdf_map_;
     std::shared_ptr<EDTEnvironment> edt_env_;
     std::shared_ptr<KinodynamicAstar> kino_astar_;
-    sentry_planner::MincoTrajectory minco_traj_;
+    sentry_planner::MincoTrajectory minco_traj_;   // 规划工作对象（仅重规划路径使用）
+    sentry_planner::MincoTrajectory empty_traj_;   // IDLE 时占位
     sentry_planner::TrajectoryTracker tracker_;
 
     // State
@@ -285,10 +488,25 @@ private:
     Eigen::Vector2d current_vel_ = Eigen::Vector2d::Zero();
     double current_yaw_ = 0.0;
     bool has_odom_ = false;
+    Eigen::Vector2d last_odom_pos_ = Eigen::Vector2d::Zero();
+    double last_odom_time_ = -1.0;
 
-    double traj_duration_ = 0.0;
-    rclcpp::Time traj_start_time_;
-    bool has_traj_ = false;
+    FsmState state_ = FsmState::IDLE;
+    rclcpp::Time unsafe_since_;
+
+    std::mutex traj_mutex_;
+    TrajSnapshotPtr active_traj_;
+
+    // 安全监控参数
+    double safety_check_horizon_ = 2.0;
+    double safety_check_dt_ = 0.03;
+    double safety_margin_warn_ = 0.20;
+    double safety_margin_hard_ = 0.15;
+    double safety_exit_hyst_ = 0.05;
+    double safety_self_ignore_r_ = 0.35;
+    double safety_imminent_time_ = 0.8;
+    double slowdown_factor_ = 0.4;
+    double brake_timeout_ = 0.5;
 
     Eigen::Vector2d final_goal_ = Eigen::Vector2d::Zero();
     bool has_final_goal_ = false;
