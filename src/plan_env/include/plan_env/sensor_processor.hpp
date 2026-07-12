@@ -21,17 +21,19 @@ public:
      * @param cloud_3d  odom 系下的 3D 点云
      * @param robot_pos 机器人 2D 位置
      * @param robot_z   机器人 Z 高度
+     * @param now_sec   点云时刻 (s)，用于占据超时龄期
      */
     void processCloud(const pcl::PointCloud<pcl::PointXYZ> &cloud_3d,
-                      const Eigen::Vector2d &robot_pos, double robot_z);
+                      const Eigen::Vector2d &robot_pos, double robot_z, double now_sec);
 
     /**
      * 处理 2D 激光 (LaserScan → 障碍标记 + 光线追踪)
      * @param laser     odom 系下的 2D 激光点云
      * @param robot_pos 机器人 2D 位置
+     * @param now_sec   激光时刻 (s)，用于占据超时龄期
      */
     void processLaser(const pcl::PointCloud<pcl::PointXY> &laser,
-                      const Eigen::Vector2d &robot_pos);
+                      const Eigen::Vector2d &robot_pos, double now_sec);
 
 private:
     MapCore *core_ = nullptr;

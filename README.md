@@ -378,11 +378,13 @@ ros2 launch sentry_bringup bringup.launch.py \
 | 可通行性融合层 | ❌ | 未实现 |
 | 可通行性标注层（单向/方向）| 🟡 | 静态离线标注；OPT-IN 默认关（`regions: []` 即 disabled）；全局软代价 + 局部 A*/MINCO 硬约束；详见 `docs/TRAVERSABILITY.md` |
 | 全局规划 (JPS, 静态先验) | ✅ | 完整可用 |
-| 全局规划在线模式 | 🟡 | `OnlineMapProxy` 已接入 JPS（global_planner_node.cpp `online` 分支：建 SDFMap → proxy → `jps_.setMap`），但未端到端验证；按当前 launch 配置直接启用会因缺 `sdf_map.*` 参数令 SDFMap 抛异常崩溃，需先补全参数接线，且为局部窗口/odom 系，不适合替代 prior 做全局 |
-| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF disc 碰撞检测（getDistance < robot_radius）|
-| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS；12 点 footprint + Lipschitz 剪枝 |
-| MPC 跟踪 | ✅ | LDLT，软约束；常量矩阵 + 分解 buildModel() 一次构建 |
-| 脱困恢复 FSM | ✅ | reroute 扇 → ESDF 后退 → 旋转 → SAFE_IDLE（sentry_local_planner_node.cpp）|
+| 全局规划在线模式 | 🟡 | `OnlineMapProxy` 已接入 JPS（global_planner_node.cpp `online` 分支），但未端到端验证；直接启用会因缺 `sdf_map.*` 参数崩溃，需先补参数接线 |
+| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF 验收（accept_clearance 0.28，薄障碍免疫）+ near_end 失败继续搜 + 部分路径打捞 + 搜索时间预算 + 可通行性标注检查（obstacle/oneway）|
+| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS；footprint + Lipschitz 剪枝 + 单向逆行软代价 |
+| MPC 跟踪 | ✅ | LDLT，软约束 |
+| 执行中轨迹安全监控 | ✅ | 50Hz 前瞻检查 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯 + BRAKE 静置超时出口（gtest + RMUC 仿真验证）|
+| 窄道/坡道对齐模式 | ✅ | 前瞻 min-ESDF/倾角触发（迟滞），停自转+航向对齐+纯追踪恒速直穿；爬行兜底 |
+| 可通行性标注层 | ✅ | .trav.yaml（free/obstacle/oneway）贯穿 JPS/A*/MINCO；RViz 标注插件 |
 | RMUC 仿真 | ✅ | submodule 提供 |
 | 真车适配 | 🟡 | 需替换 LIO 输入话题 + map→odom 全局定位 |
 
@@ -395,7 +397,10 @@ ros2 launch sentry_bringup bringup.launch.py \
 ### 短期（修 bug + 接缝）
 
 - 端到端验证在线建图模式（`OnlineMapProxy` 已接入 JPS，待跑通 + 调参）
-- 重规划频率从 2Hz 提到 ~10Hz（多线程 executor 已就位，需验证不引入低速起步抖动）
+- ~~局部规划器 trajectory swap 原子化（修 race）~~ ✅ 已完成（`TrajSnapshot` 只读快照交换）
+- ~~点云分支补 raycast clearing~~ ✅ 已完成（法向量分类 + raycast + 占据超时）
+- 标注图补高地南沿缺口（x 6.5~12.4 段，真值有 0.2m 台阶，JPS 可能直穿）
+- 幽灵格注入恢复时限、0.70m 东坡道通行的整机回归测试
 
 ### 中期（功能完整化）
 

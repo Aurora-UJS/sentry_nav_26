@@ -32,6 +32,9 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_auto_add_gtest(test_kinodynamic_astar test/test_kinodynamic_astar.cpp)
 endif()
 
 ament_auto_package(

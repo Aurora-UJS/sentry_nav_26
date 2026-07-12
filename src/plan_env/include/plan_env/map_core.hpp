@@ -39,7 +39,12 @@ public:
     void slideMapTo(const Eigen::Vector2d &new_center);
     void clearRingSlice(int dim, int from, int to);
     void raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end);
-    void thresholdLogodds();
+    // now: 当前传感器时刻 (s)，用于 occ_timeout_ 龄期门控
+    void thresholdLogodds(double now);
+    // 卡滞脱困: 注入虚拟障碍块（雷达扫不到的小坎等本体感知障碍），occ_timeout 自动过期
+    void addVirtualObstacle(const Eigen::Vector2d &pos, double radius, double now);
+    // 静态先验层查询（世界坐标，独立于滑窗环形缓冲）
+    bool isStaticOccupied(const Eigen::Vector2d &pos) const;
 
     // ==================== ESDF ====================
     void updateESDF2d();

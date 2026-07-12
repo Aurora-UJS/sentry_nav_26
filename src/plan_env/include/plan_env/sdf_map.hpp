@@ -62,6 +62,8 @@ public:
   MapCore& getCore() { return core_; }
 
   Global_Map load_map(std::string &path, const std::string &frame, int &map_buffer_size, MappingParameters &mp);
+  // 静态先验层加载（标准 ROS map yaml）
+  void loadStaticLayer(const std::string &yaml_path);
 
 private:
   MapCore core_;
@@ -85,6 +87,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_, esdf_pub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_publisher_;
   std::vector<std::shared_ptr<nav_msgs::msg::OccupancyGrid>> map_msgs;
+
+  // 高度过滤参数 (ROS 参数读取后缓存)
 
   // ROS 回调
   void odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom);

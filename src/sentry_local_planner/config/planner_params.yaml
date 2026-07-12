@@ -9,14 +9,19 @@ sentry_local_planner:
       use_global_map: false
       use_cloud_input: true
       cloud_topic: "/cloud_registered"
-      cloud_min_height: -0.2        # 包含低于机器人的地面/坡面
-      cloud_max_height: 0.8         # 机器人高度以上的悬空障碍
+      # --- 法向量坡度判定 (z 带相对机身 z，随上/下坡移动) ---
+      # 只取机身高度附近的表面判障碍: 高处平台面/桥面不在带内，
+      # 台阶/墙的竖直面在带内 |n.z|≈0 → 障碍；地板/≤17°坡面 |n.z|≈1 → 可通行
+      cloud_min_height: -0.2        # z 带下沿 (相对机身 z)
+      cloud_max_height: 0.15        # z 带上沿；旧值 0.8 会把可从旁边绕过的高处结构也标成障碍
+      normal_voxel_leaf: 0.08       # 法向量估计前的体素降采样 (m)
+      normal_k: 10                  # kNN 邻域点数
+      normal_count_thresh: 2        # 每格最少支持点数，防稀疏噪声成障
       map_size_x: 30.0              # RMUC 赛场 ~15x28m, 留余量
       map_size_y: 30.0
       resolusion_: 0.05             # 5cm 分辨率 (600x600=360K 格子)
       obstacles_inflation: 0.05     # 仅做地图噪声平滑，车体安全由 footprint 检测负责
-      max_slope_deg: 17.0           # 最大可通行坡度 17° (RMUC 赛场 15° + 余量)
-      step_height_max: 0.08         # 最大可通行台阶高度 8cm
+      max_slope_deg: 30.0           # 最大可通行坡度 (对齐 rose；放行堡垒凸起等 <=30° 斜面，墙面 |n.z|≈0 仍成障)
       local_map_margin: 10
       local_update_range_x: 8.0     # 局部更新范围 8m
       local_update_range_y: 8.0
@@ -27,13 +32,14 @@ sentry_local_planner:
       logodds_max: 3.5               # 上限 clamp (~97% 占据)
       logodds_min: -2.0              # 下限 clamp (~12% 占据)
       logodds_thresh: 0.0            # 占据阈值: > 此值 → occupied
+      occ_timeout: 3.5               # 占据超时 (s): 超时未再命中的格子视为空闲，清自转幽灵障碍；<=0 关闭
 
     # --- Kinodynamic A* 参数 ---
     search:
       max_tau: 0.6
       init_max_tau: 0.8
       max_vel: 3.0                 # 哨兵最大速度 3 m/s
-      max_acc: 3.0                 # 麦轮加速度
+      max_acc: 2.0                 # 麦轮加速度 (3.0 在 3 rad/s 自转下实测侧翻，降到 2.0 保护底盘)
       w_time: 5.0
       horizon: 15.0                # 搜索范围 15m (赛场对角线)
       resolution_astar: 0.05      # 与 sdf_map 分辨率一致
@@ -41,7 +47,16 @@ sentry_local_planner:
       lambda_heu: 5.0
       allocate_num: 100000
       check_num: 50
-      robot_radius: 0.3            # 车体半径，footprint 碰撞检测用
+      robot_radius: 0.3            # 车体半径 (MINCO footprint 用)
+      w_clearance: 20.0            # 靠近障碍软惩罚权重：有余地时选宽敞走廊 (rose clearance_weight 思想)
+      clearance_dist: 0.5          # 期望间隙 (m)，esdf 低于它开始加代价
+      start_ignore_radius: 0.35    # A* 起点豁免半径: 贴墙被 BRAKE 后仍能规划驶出路径，防死锁
+      # A* 验收 ESDF 阈值 = robot_radius - res/2 (抵消格心量化)。
+      # 旧 5 点二值 footprint 采样从 ≤0.2m 薄障碍带 (台沿/围栏) 的采样点间穿过，
+      # 被监控 (hard 0.15) 必否 → EXEC↔BRAKE 振荡；阈值链 0.28 > warn 0.20 > hard 0.15
+      accept_clearance: 0.28
+      max_search_time_ms: 40.0     # 搜索时间预算: 目标不可达时防全域搜索拖死 10Hz 重规划
+      near_end_min_progress: 0.4   # 搜索失败时部分路径 (NEAR_END) 的最小推进量，挡退化轨迹
 
     # --- 模式选择 ---
     planner_mode: "minco"          # "bspline" | "minco"
@@ -51,13 +66,28 @@ sentry_local_planner:
     controller:
       frequency: 50.0              # 控制频率 50Hz
       kp: 2.0                      # PD 位置误差增益
-      lookahead_time: 0.2          # 跟踪前视时间，避免频繁重规划时长期卡在低速起步段
-      spin_rate: 0.0               # 无轨迹/开阔区自转角速度；LIO 仿真中默认关闭，避免点云发散
-      narrow_passage_dist: 0.5     # ESDF 距离 < 此值时停止自转，切换为航向对齐 (m)
-      yaw_align_kp: 1.2            # 窄口/路径航向对齐 P 增益
-      max_yaw_rate: 0.8            # 航向跟踪角速度限幅 (rad/s)，过大会让 LIO 点云配准发散
-      max_yaw_acc: 1.5             # 航向角加速度限幅 (rad/s^2)，避免 angular.z 阶跃
-      follow_path_yaw: true        # 移动时车头跟随轨迹方向；false 时恢复开阔区域自转
+      spin_rate: 3.0               # 自转角速度 (rad/s)，改善 LiDAR 覆盖
+      # cmd_frame=world: 输出 odom 系速度到 /cmd_vel_world，由 chassis_cmd_node
+      # （真车=电控 MCU）用高频陀螺 yaw 旋转到机体系。诊断实测：自转 3 rad/s 下
+      # LIO yaw 有 ~50-70ms 龄期 (12~21° 误差)，在 50Hz 侧用它旋转会引入方向偏差。
+      cmd_frame: "world"           # "world" | "body"(旧行为，直接发 /cmd_vel)
+      # --- 窄道/坡道对齐模式 ---
+      # 前瞻 min-ESDF 或机身倾角触发（带迟滞）：停自转、航向对齐轨迹方向
+      # (车头或���尾，不侧行)、纯追踪恒低速直穿。纯追踪按几何弧长取前瞻点，
+      # 与时间参考脱钩，重规划重置参考速度不影响它（常规 MPC 会被打回起步段）。
+      # 该模式下 SLOWDOWN 不再乘 0.4：warn 阈值按自转扫掠圆(半对角线)标定，
+      # 对齐直行的有效半宽更小，模式本身已是恒低速。
+      corridor_enter_dist: 0.55    # 当前+前瞻 min esdf < 此值 → 进入 (m)
+      corridor_exit_dist: 0.80     # min esdf > 此值 → 退出（迟滞防振荡）
+      corridor_preview_time: 1.2   # 沿轨迹前瞻时长 (s)：进窄口前就完成对齐
+      corridor_speed: 0.8          # 对齐后恒速直穿 (m/s)
+      corridor_align_speed: 0.2    # 未对齐时爬行速度（斜着冲窄口=加宽自己）
+      corridor_align_tol_deg: 20.0 # 航向误差小于此值视为已对齐
+      corridor_lookahead: 0.6      # 纯追踪前瞻弧长 (m)
+      slope_enter_deg: 7.0         # 倾角 > 此值 → 坡道模式（坡上自转有侧翻风险）
+      slope_exit_deg: 4.0          # 倾角 < 此值退出
+      yaw_align_kp: 3.0            # 航向对齐 P 增益
+      max_align_wz: 2.5            # 对齐角速度上限 (rad/s)
 
     # --- MPC 参数 ---
     mpc:
@@ -91,37 +121,55 @@ sentry_local_planner:
       algorithm2: 15
       order: 3
 
-    # --- 主动重规划参数 ---
+    # --- 按需重规划参数 ---
+    # 10Hz 无条件全量重规划会把参考速度每 100ms 打回起步段（实测 5.4m 直线
+    # 平均有效速度仅 0.27 m/s）。改为按需触发：无轨迹 / SLOWDOWN / 跟踪偏差
+    # 超限 / 目标移动 / 周期刷新；执行中重规划从当前轨迹参考点续接。
     replan:
-      frequency: 2.0              # 主动重规划频率 (Hz)，避免控制器长期停留在新轨迹低速起步段
+      frequency: 10.0             # 重规划检查频率 (Hz)（触发条件见上）
+      deviation: 0.5              # 跟踪偏差超此值 → 从实测状态重锚 (m)
+      refresh_period: 1.0         # 周期性提质刷新间隔 (s)
+      plan_lead: 0.15             # 续接点前瞻量 (s)，覆盖一次规划耗时
+      goal_clearance: 0.45        # 局部目标最小 ESDF 间隙 (m)：钉在墙皮上的 pursuit 点先推开再给 A*
+      crawl_fail_threshold: 5     # 规划连败此数后开启窄道爬行兜底（配合窄区 esdf 触发）
+      jps_lookahead: 2.5          # JPS 路径加密跟随: 局部目标取路径前方此弧长处 (m)。
+                                  # 局部图看不见坑/跌落(负障碍)，稀疏 waypoint 间自由规划会抄近路
+                                  # 穿过先验图才知道的坑(实测卡死)；贴 JPS 路径走则没有抄近路空间
+
+    # --- 卡滞检测（本体感知脱困） ---
+    # 雷达扫不到的小坎/低矮异物顶住车时，"指令在动而车没动"是唯一可靠信号。
+    # 处置: 受阻方向注入虚拟障碍块 → A* 侧移绕行；occ_timeout 让它自动过期(误判自愈)
+    stuck:
+      timeout: 0.8                # 持续推不动多久判卡滞 (s)
+      inject_dist: 0.5            # 虚拟障碍块中心距车距离 (m)
+
+    # --- 执行中轨迹安全监控 (50Hz 控制回路内) ---
+    # 阈值必须低于规划器的验收标准 (MINCO footprint esdf>=dist0，贴墙时中心
+    # esdf 合法低到 ~0.28m)，否则监控把规划器的正常输出判为不安全 → 振荡。
+    safety:
+      check_horizon: 2.0          # 前瞻窗口 (s)，覆盖 ~20 个重规划周期
+      check_dt: 0.03              # 采样步长 (s)；max_vel*dt ≈ 0.09m ≲ 2 voxel，防穿墙漏检
+      margin_warn: 0.20           # 软阈值：低于它 → SLOWDOWN (比有意贴墙更近才报)
+      margin_hard: 0.15           # 硬阈值：轨迹真穿障 (~3 voxel)；迫近才 BRAKE
+      exit_hysteresis: 0.05       # 退出 SLOWDOWN 需 min esdf >= warn + 此值，防边界抖动
+      self_ignore_radius: 0.35    # 距当前位置小于此值的采样点跳过：已占据区域不算未来碰撞，贴墙脱困豁免
+      imminent_time: 0.8          # 硬不安全点距今小于此值 → 直接刹停 (3m/s 全减速需 1s/1.5m)
+      slowdown_factor: 0.4        # SLOWDOWN 状态线速度缩放
+      brake_timeout: 0.5          # 硬不安全持续超时仍未修复 → 刹停 (s)，覆盖 ~5 个重规划周期
+      # BRAKE 失败出口: 刹停静置后降级 IDLE 重新找路。BRAKE 原先只有规划成功
+      # 一条出路，规划连败即永久死锁（台沿实证 762 次失败 840s 冻结）
+      brake_settle_time: 1.0      # 进 BRAKE 静置多久判刹停完成 (s)
+      brake_settle_vel: 0.1       # 静置速度阈值 (m/s)；坡上滑动时不降级
 
     # --- MINCO 梯度优化参数 ---
     minco_opt:
       lambda_smooth: 0.1           # 平滑权重 (MINCO 天然平滑，比 bspline 小)
       lambda_col: 8.0              # 碰撞代价权重 (与 bspline 对齐)
-      lambda_oneway: 8.0           # 单向区软方向代价权重：采样点落在 oneway 格且速度偏出允许锥时按 (cos_tol-dot)^2 受罚 (软约束，不硬挡)
+      lambda_oneway: 8.0           # 单向台阶逆行惩罚权重 (可通行性标注层)
+      dist0_vel_k: 0.0             # 间隙-速度耦合系数 (0=关闭)
       lambda_feas: 0.001           # 动力学可行性惩罚
       robot_radius: 0.3            # 车体半径，用于 footprint 碰撞检测
-      dist0: 0.05                  # ESDF 安全阈值：footprint 点距墙小于此值才产生代价（小值，安全由 robot_radius 保证）
-      dist0_vel_k: 0.0             # 速度相关裕度：dist0_eff = dist0 + dist0_vel_k*|v|。0=关闭(默认)；高速调参建议 0.05~0.1，会改 MINCO 轨迹行为需仿真验证
+      dist0: 0.30                  # ESDF 软间隙：footprint 点距障碍低于此值产生代价 — 有余地时轨迹主动留 0.3m 余量，窄道软约束仍可贴近 (原 0.05 等于无间隙偏好)
       num_samples: 8               # 每段采样点数
       max_iter: 200                # L-BFGS 最大迭代次数
       max_time_ms: 20.0            # 最大优化时间 (ms)
-
-    # --- 静态可通行性标注层 (free/obstacle/oneway) ---
-    traversability:
-      yaml_path: ""                # opt-in：默认空=禁用(行为与未启用完全一致)；路径通常由 launch 注入(指向 sentry_bringup 随包安装的 .trav.yaml)
-
-    # --- 脱困恢复参数 ("走不通就换一条路径": reroute 扇 → ESDF 后退 → 原地转) ---
-    recovery:
-      fan_offsets_deg: [20.0, 40.0, 60.0, 90.0, 120.0, 150.0, 180.0]  # reroute 角度扇(相对目标方位，先小后大)
-      fan_radius_scales: [1.0, 0.66, 0.4]   # 候选子目标距离 = 该比例 × 局部范围
-      max_astar_attempts: 8                 # 每次失败时 reroute 的 A* 搜索预算(防卡顿)
-      candidate_clearance_margin: 0.1       # 候选点 ESDF 须 > robot_radius + 此值才尝试
-      backoff_distance: 0.45                # 后退步长 (m)，沿 ESDF 梯度远离障碍
-      backoff_max_vel_scale: 0.5            # 后退轨迹限速 = 此比例 × max_vel
-      backoff_cooldown_cycles: 2            # 两次后退之间至少间隔的 replan 拍数
-      rotate_enable: true                   # 无法后退时是否原地转向重新对准目标
-      rotate_yaw_rate: 0.6                  # 原地转角速度 (rad/s)
-      rotate_max_time: 1.5                  # 原地转最长时间 (s) 后重试 reroute
-      global_cycle_cap: 5                   # 非改善型恢复循环上限，超出进入 SAFE_IDLE 保持(有进展的后退会重置)

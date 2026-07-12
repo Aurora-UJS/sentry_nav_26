@@ -1,4 +1,5 @@
 #include "plan_env/sdf_map.hpp"
+#include <fstream>
 
 using namespace std;
 
@@ -63,7 +64,11 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	esdf_timer_ = node_->create_wall_timer(0.05s, std::bind(&SDFMap::updateESDFCallback, this));
 	mp.obstacles_inflation_ = node_->declare_parameter<double>("sdf_map.obstacles_inflation", 0.0009);
 	mp.max_slope_rad_ = node_->declare_parameter<double>("sdf_map.max_slope_deg", 17.0) * M_PI / 180.0;
-	mp.step_height_max_ = node_->declare_parameter<double>("sdf_map.step_height_max", 0.08);
+	mp.cloud_min_h_ = node_->declare_parameter<double>("sdf_map.cloud_min_height", -0.2);
+	mp.cloud_max_h_ = node_->declare_parameter<double>("sdf_map.cloud_max_height", 0.15);
+	mp.normal_voxel_leaf_ = node_->declare_parameter<double>("sdf_map.normal_voxel_leaf", 0.08);
+	mp.normal_k_ = node_->declare_parameter<int>("sdf_map.normal_k", 10);
+	mp.normal_count_thresh_ = node_->declare_parameter<int>("sdf_map.normal_count_thresh", 3);
 	mp.local_map_margin_ = node_->declare_parameter<int>("sdf_map.local_map_margin", 10);
 	mp.local_update_range_(0) = node_->declare_parameter<double>("sdf_map.local_update_range_x", 3.0);
 	mp.local_update_range_(1) = node_->declare_parameter<double>("sdf_map.local_update_range_y", 3.0);
@@ -75,6 +80,7 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	mp.logodds_max_ = node_->declare_parameter<double>("sdf_map.logodds_max", 3.5);
 	mp.logodds_min_ = node_->declare_parameter<double>("sdf_map.logodds_min", -2.0);
 	mp.logodds_thresh_ = node_->declare_parameter<double>("sdf_map.logodds_thresh", 0.0);
+	mp.occ_timeout_ = node_->declare_parameter<double>("sdf_map.occ_timeout", 0.0);
 
 	RCLCPP_INFO(node_->get_logger(),
 		"Inflation: %.3fm (inf_step=%d), local_range=(%.1f,%.1f)",
@@ -89,6 +95,12 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 
 	mp.map_min_boundary_ = mp.map_origin_;
 	mp.map_max_boundary_ = mp.map_origin_ + mp.map_size_;
+
+	// 静态先验层：确定性不可通行基准（坑/跌落沿/封闭区等标注），
+	// 动态点云层只在其上叠加临时障碍。空路径 = 关闭。
+	std::string static_path = node_->declare_parameter<std::string>("sdf_map.static_map_path", "");
+	if (!static_path.empty())
+		loadStaticLayer(static_path);
 
 	// 初始化 sensor processor
 	sensor_proc_.setMapCore(&core_);
@@ -107,9 +119,6 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	{
 		std::string cloud_topic = node_->declare_parameter<std::string>("sdf_map.cloud_topic", "/cloud_registered");
 		RCLCPP_INFO(node_->get_logger(), "Using PointCloud2 input on topic: %s", cloud_topic.c_str());
-
-		mp.cloud_min_height_ = node_->declare_parameter<double>("sdf_map.cloud_min_height", -0.1);
-		mp.cloud_max_height_ = node_->declare_parameter<double>("sdf_map.cloud_max_height", 1.0);
 
 		cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
 			cloud_topic, rclcpp::SensorDataQoS(),
@@ -217,6 +226,66 @@ Global_Map SDFMap::load_map(std::string &path, const std::string &frame, int &ma
 	return gm;
 }
 
+void SDFMap::loadStaticLayer(const std::string &yaml_path)
+{
+	// 解析标准 ROS map yaml（与全局规划器 PriorMap 同约定：
+	// 垂直翻转到世界系 y 向上；只有 >250 的纯白算 free，黑/灰(unknown)=占据）
+	std::ifstream ifs(yaml_path);
+	if (!ifs.is_open())
+	{
+		RCLCPP_ERROR(node_->get_logger(), "Static layer: cannot open %s", yaml_path.c_str());
+		return;
+	}
+	std::string line, image_file;
+	double res = 0.05;
+	Eigen::Vector2d origin(0, 0);
+	while (std::getline(ifs, line))
+	{
+		if (line.find("image:") != std::string::npos)
+			image_file = line.substr(line.find(':') + 2);
+		else if (line.find("resolution:") != std::string::npos)
+			res = std::stod(line.substr(line.find(':') + 2));
+		else if (line.find("origin:") != std::string::npos)
+		{
+			auto b = line.find('[');
+			auto c1 = line.find(',', b);
+			auto c2 = line.find(',', c1 + 1);
+			origin(0) = std::stod(line.substr(b + 1, c1 - b - 1));
+			origin(1) = std::stod(line.substr(c1 + 1, c2 - c1 - 1));
+		}
+	}
+	while (!image_file.empty() && (image_file.back() == ' ' || image_file.back() == '\r'))
+		image_file.pop_back();
+	std::string pgm = yaml_path.substr(0, yaml_path.find_last_of('/') + 1) + image_file;
+	cv::Mat img = cv::imread(pgm, cv::IMREAD_GRAYSCALE);
+	if (img.empty())
+	{
+		RCLCPP_ERROR(node_->get_logger(), "Static layer: cannot load %s", pgm.c_str());
+		return;
+	}
+	cv::flip(img, img, 0);
+
+	auto &md = core_.md_;
+	md.static_w_ = img.cols;
+	md.static_h_ = img.rows;
+	md.static_origin_ = origin;
+	md.static_res_inv_ = 1.0 / res;
+	md.static_map_.assign((size_t)img.cols * img.rows, 0);
+	int occ = 0;
+	for (int r = 0; r < img.rows; ++r)
+		for (int c = 0; c < img.cols; ++c)
+			if (img.at<uint8_t>(r, c) <= 250)
+			{
+				md.static_map_[(size_t)c * img.rows + r] = 1;
+				occ++;
+			}
+	md.has_static_ = true;
+	RCLCPP_INFO(node_->get_logger(),
+				"Static layer loaded: %dx%d res=%.3f origin=(%.2f,%.2f) occupied=%d (%.1f%%)",
+				img.cols, img.rows, res, origin(0), origin(1), occ,
+				100.0 * occ / (img.cols * img.rows));
+}
+
 // ==================== ROS 回调 (薄壳) ====================
 
 void SDFMap::odomCallback(const nav_msgs::msg::Odometry::ConstSharedPtr &odom)
@@ -255,7 +324,8 @@ void SDFMap::laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &la
 	if (isnan(core_.md_.laser_pos_(0)) || isnan(core_.md_.laser_pos_(1)))
 		return;
 
-	sensor_proc_.processLaser(latest_laser, core_.md_.laser_pos_);
+	sensor_proc_.processLaser(latest_laser, core_.md_.laser_pos_,
+							  rclcpp::Time(laser_msg->header.stamp).seconds());
 }
 
 void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg)
@@ -276,7 +346,8 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 		"cloudCallback: %zu pts, robot at (%.2f, %.2f)",
 		cloud_3d.points.size(), core_.md_.laser_pos_(0), core_.md_.laser_pos_(1));
 
-	sensor_proc_.processCloud(cloud_3d, core_.md_.laser_pos_, core_.md_.laser_z_);
+	sensor_proc_.processCloud(cloud_3d, core_.md_.laser_pos_, core_.md_.laser_z_,
+							  rclcpp::Time(cloud_msg->header.stamp).seconds());
 }
 
 void SDFMap::updateESDFCallback()

@@ -17,9 +17,16 @@ def generate_launch_description():
         "planner_params.yaml",
     )
 
+    # 静态先验层：与全局规划器共用同一张标注地图（确定性不可通行基准）
+    try:
+        static_map_path = os.path.join(
+            get_package_share_directory("sentry_bringup"), "map", "rmuc_2025.yaml"
+        )
+    except Exception:
+        static_map_path = ""
+
     # 静态可通行性标注层 .trav.yaml 路径。默认空 = 禁用 (独立启动本 launch 不依赖其它包)。
-    # 整机/仿真由上层 sentry_bringup 注入实际路径 — bringup 是地图路径的唯一来源, 且 bringup
-    # 依赖本包; 反向引用其 share 目录会造成依赖环。可用 trav_yaml:=<路径> 覆盖。
+    # 整机/仿真由上层 sentry_bringup 注入实际路径，可用 trav_yaml:=<路径> 覆盖。
     trav_yaml = LaunchConfiguration("trav_yaml", default="")
 
     planner_node = Node(
@@ -29,9 +36,19 @@ def generate_launch_description():
         output="screen",
         parameters=[
             planner_params,
-            {"use_sim_time": use_sim_time},
+            {"use_sim_time": use_sim_time, "sdf_map.static_map_path": static_map_path},
             {"traversability.yaml_path": trav_yaml},
         ],
+    )
+
+    # 仿真侧"底盘固件": /cmd_vel_world → 陀螺 yaw 旋转 → /cmd_vel
+    # 真车部署时删除本节点，由电控 MCU 实现同一逻辑
+    chassis_cmd_node = Node(
+        package="sentry_local_planner",
+        executable="chassis_cmd_node",
+        name="chassis_cmd",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
     )
 
     return LaunchDescription(
@@ -39,5 +56,6 @@ def generate_launch_description():
             DeclareLaunchArgument("use_sim_time", default_value="true"),
             DeclareLaunchArgument("trav_yaml", default_value=""),
             planner_node,
+            chassis_cmd_node,
         ]
     )

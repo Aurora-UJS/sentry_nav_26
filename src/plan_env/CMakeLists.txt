@@ -14,9 +14,18 @@ ament_auto_find_build_dependencies()
 ## Build ##
 ###########
 
+find_package(PCL REQUIRED COMPONENTS common filters search kdtree features)
+find_package(OpenMP)
+
 ament_auto_add_library(${PROJECT_NAME} SHARED
   DIRECTORY src
 )
+target_include_directories(${PROJECT_NAME} PUBLIC ${PCL_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARIES})
+if(OpenMP_CXX_FOUND)
+  # NormalEstimationOMP 是头文件模板，在本包实例化，需要本包开 OpenMP 才真并行
+  target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_CXX)
+endif()
 
 # yaml-cpp 非 ament 包, 需显式链接 (TraversabilityLayer 解析 .trav.yaml)
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
@@ -32,6 +41,15 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_occ_timeout
+    test/test_occ_timeout.cpp
+    src/map_core.cpp
+  )
+  target_include_directories(test_occ_timeout PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
 endif()
 
 ament_auto_package(
