@@ -80,6 +80,15 @@ struct MappingData
   static constexpr float kNeverHit = -1e9f;
   std::vector<float> last_hit_time_;
 
+  // 静态先验层：确定性不可通行基准。动态点云层只能在其上叠加临时障碍，
+  // 永远不能清除静态格（不受 raycast / occ_timeout 影响）。
+  // 存储 [x * static_h_ + y]，与全局规划器 PriorMap 同约定 (y 已翻转到世界系向上)。
+  bool has_static_ = false;
+  std::vector<uint8_t> static_map_;
+  Eigen::Vector2d static_origin_ = Eigen::Vector2d::Zero();
+  double static_res_inv_ = 20.0;
+  int static_w_ = 0, static_h_ = 0;
+
   std::vector<double> tmp_buffer1_;
   Eigen::Vector2i local_bound_min_, local_bound_max_;
   Eigen::Vector2i ring_offset_;

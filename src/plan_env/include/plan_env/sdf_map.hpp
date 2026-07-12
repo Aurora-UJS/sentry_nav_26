@@ -62,6 +62,8 @@ public:
   MapCore& getCore() { return core_; }
 
   Global_Map load_map(std::string &path, const std::string &frame, int &map_buffer_size, MappingParameters &mp);
+  // 静态先验层加载（标准 ROS map yaml）
+  void loadStaticLayer(const std::string &yaml_path);
 
 private:
   MapCore core_;

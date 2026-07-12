@@ -108,4 +108,33 @@ TEST(OccTimeout, SlideResetsStamp)
     EXPECT_FLOAT_EQ(core.md_.logodds_buffer_[addr], 0.0f);
 }
 
+TEST(StaticLayer, BaselineNeverExpires)
+{
+    auto core = makeCore(3.5);
+    // 手工构造 20x20 静态层，占据格 (2,3)，与地图同原点同分辨率
+    auto &md = core.md_;
+    md.static_w_ = 20; md.static_h_ = 20;
+    md.static_origin_ = Eigen::Vector2d(-1.0, -1.0);
+    md.static_res_inv_ = 10.0;
+    md.static_map_.assign(400, 0);
+    md.static_map_[2 * 20 + 3] = 1; // 静态格 (2,3) → 世界 (-0.75, -0.65)
+    md.has_static_ = true;
+
+    Eigen::Vector2d wp(-0.75, -0.65);
+    EXPECT_TRUE(core.isStaticOccupied(wp));
+    EXPECT_FALSE(core.isStaticOccupied(Eigen::Vector2d(0.5, 0.5)));
+
+    // 从未有动态命中、时间任意推进：静态格恒为占据（基准不过期）
+    core.thresholdLogodds(1e6);
+    Eigen::Vector2i idx;
+    core.posToIndex(wp, idx);
+    EXPECT_EQ(core.md_.occupancy_buffer_inflate_[core.toAddress(idx)], 1);
+
+    // 动态幽灵在静态自由区照常过期
+    Eigen::Vector2i dyn(10, 10);
+    hitCell(core, dyn, 100.0);
+    core.thresholdLogodds(200.0);
+    EXPECT_EQ(occAt(core, dyn), 0);
+}
+
 } // namespace

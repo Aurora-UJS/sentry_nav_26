@@ -261,9 +261,43 @@ void MapCore::raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end)
     }
 }
 
+void MapCore::addVirtualObstacle(const Eigen::Vector2d &pos, double radius, double now)
+{
+    // 卡滞脱困: 在受阻方向注入虚拟障碍块，让 A* 绕行。
+    // 注入值取 2×logodds_max，抵抗后续射线 miss 的侵蚀 (~2s)；
+    // 雷达看不见小坎所以不会再命中续期，occ_timeout 到期自动过期 — 误判可自愈。
+    Eigen::Vector2i center;
+    posToIndex(pos, center);
+    int r = (int)ceil(radius * mp_.resolution_inv_);
+    for (int dx = -r; dx <= r; ++dx)
+        for (int dy = -r; dy <= r; ++dy)
+        {
+            Eigen::Vector2i idx(center(0) + dx, center(1) + dy);
+            if (!isInMap(idx))
+                continue;
+            int addr = toAddress(idx);
+            md_.logodds_buffer_[addr] = (float)(2.0 * mp_.logodds_max_);
+            md_.last_hit_time_[addr] = (float)now;
+            md_.occupancy_buffer_inflate_[addr] = 1;  // 立即生效，不等下一帧 threshold
+        }
+    md_.esdf_need_update_ = true;
+}
+
+bool MapCore::isStaticOccupied(const Eigen::Vector2d &pos) const
+{
+    if (!md_.has_static_)
+        return false;
+    int gx = (int)floor((pos(0) - md_.static_origin_(0)) * md_.static_res_inv_);
+    int gy = (int)floor((pos(1) - md_.static_origin_(1)) * md_.static_res_inv_);
+    if (gx < 0 || gy < 0 || gx >= md_.static_w_ || gy >= md_.static_h_)
+        return false;
+    return md_.static_map_[gx * md_.static_h_ + gy] != 0;
+}
+
 void MapCore::thresholdLogodds(double now)
 {
-    // 占据 = logodds 超阈值 且 最近被命中过 (occ_timeout_ <= 0 时关闭龄期门控)。
+    // 占据 = 静态先验层(确定性基准，不受超时/raycast 影响)
+    //       ∨ (动态层 logodds 超阈值 且 最近被命中过；occ_timeout_ <= 0 关闭龄期门控)。
     // 只影响局部更新窗口内的格子；窗口外维持原状，远处未复测的真实墙体不会凭空过期。
     const bool use_timeout = mp_.occ_timeout_ > 0.0;
     for (int x = md_.local_bound_min_(0); x <= md_.local_bound_max_(0); ++x)
@@ -274,6 +308,12 @@ void MapCore::thresholdLogodds(double now)
             if (occ && use_timeout &&
                 now - (double)md_.last_hit_time_[addr] > mp_.occ_timeout_)
                 occ = false;
+            if (!occ && md_.has_static_)
+            {
+                Eigen::Vector2d wp;
+                indexToPos(Eigen::Vector2i(x, y), wp);
+                occ = isStaticOccupied(wp);
+            }
             md_.occupancy_buffer_inflate_[addr] = occ ? 1 : 0;
         }
 }

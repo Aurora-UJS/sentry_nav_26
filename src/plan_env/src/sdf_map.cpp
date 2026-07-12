@@ -1,4 +1,5 @@
 #include "plan_env/sdf_map.hpp"
+#include <fstream>
 
 using namespace std;
 
@@ -94,6 +95,12 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 
 	mp.map_min_boundary_ = mp.map_origin_;
 	mp.map_max_boundary_ = mp.map_origin_ + mp.map_size_;
+
+	// 静态先验层：确定性不可通行基准（坑/跌落沿/封闭区等标注），
+	// 动态点云层只在其上叠加临时障碍。空路径 = 关闭。
+	std::string static_path = node_->declare_parameter<std::string>("sdf_map.static_map_path", "");
+	if (!static_path.empty())
+		loadStaticLayer(static_path);
 
 	// 初始化 sensor processor
 	sensor_proc_.setMapCore(&core_);
@@ -217,6 +224,66 @@ Global_Map SDFMap::load_map(std::string &path, const std::string &frame, int &ma
 	mp.map_voxel_num_(1) = std::max(gm.map_voxel_num_(1), mp.map_voxel_num_(1));
 	map_buffer_size = std::max(map_buffer_size, buffer_size);
 	return gm;
+}
+
+void SDFMap::loadStaticLayer(const std::string &yaml_path)
+{
+	// 解析标准 ROS map yaml（与全局规划器 PriorMap 同约定：
+	// 垂直翻转到世界系 y 向上；只有 >250 的纯白算 free，黑/灰(unknown)=占据）
+	std::ifstream ifs(yaml_path);
+	if (!ifs.is_open())
+	{
+		RCLCPP_ERROR(node_->get_logger(), "Static layer: cannot open %s", yaml_path.c_str());
+		return;
+	}
+	std::string line, image_file;
+	double res = 0.05;
+	Eigen::Vector2d origin(0, 0);
+	while (std::getline(ifs, line))
+	{
+		if (line.find("image:") != std::string::npos)
+			image_file = line.substr(line.find(':') + 2);
+		else if (line.find("resolution:") != std::string::npos)
+			res = std::stod(line.substr(line.find(':') + 2));
+		else if (line.find("origin:") != std::string::npos)
+		{
+			auto b = line.find('[');
+			auto c1 = line.find(',', b);
+			auto c2 = line.find(',', c1 + 1);
+			origin(0) = std::stod(line.substr(b + 1, c1 - b - 1));
+			origin(1) = std::stod(line.substr(c1 + 1, c2 - c1 - 1));
+		}
+	}
+	while (!image_file.empty() && (image_file.back() == ' ' || image_file.back() == '\r'))
+		image_file.pop_back();
+	std::string pgm = yaml_path.substr(0, yaml_path.find_last_of('/') + 1) + image_file;
+	cv::Mat img = cv::imread(pgm, cv::IMREAD_GRAYSCALE);
+	if (img.empty())
+	{
+		RCLCPP_ERROR(node_->get_logger(), "Static layer: cannot load %s", pgm.c_str());
+		return;
+	}
+	cv::flip(img, img, 0);
+
+	auto &md = core_.md_;
+	md.static_w_ = img.cols;
+	md.static_h_ = img.rows;
+	md.static_origin_ = origin;
+	md.static_res_inv_ = 1.0 / res;
+	md.static_map_.assign((size_t)img.cols * img.rows, 0);
+	int occ = 0;
+	for (int r = 0; r < img.rows; ++r)
+		for (int c = 0; c < img.cols; ++c)
+			if (img.at<uint8_t>(r, c) <= 250)
+			{
+				md.static_map_[(size_t)c * img.rows + r] = 1;
+				occ++;
+			}
+	md.has_static_ = true;
+	RCLCPP_INFO(node_->get_logger(),
+				"Static layer loaded: %dx%d res=%.3f origin=(%.2f,%.2f) occupied=%d (%.1f%%)",
+				img.cols, img.rows, res, origin(0), origin(1), occ,
+				100.0 * occ / (img.cols * img.rows));
 }
 
 // ==================== ROS 回调 (薄壳) ====================
