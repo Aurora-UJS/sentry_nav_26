@@ -6,13 +6,15 @@
 
 ## 特性
 
-- **LIO 定位**：基于 [Small Point-LIO](https://github.com/Aurora-UJS/small_point_lio)，输出高频 `/Odometry` 与配准点云 `/cloud_registered`
-- **在线 2D 建图**：log-odds 占用栅格 + 高程图 + Felzenszwalb 两遍 ESDF（`plan_env`）
+- **LIO 定位**：基于 [Small Point-LIO](https://github.com/Aurora-UJS/small_point_lio)，输出高频 `/Odometry`（含 ESKF twist）与配准点云 `/cloud_registered`
+- **在线 2D 建图**：log-odds 占用栅格 + 法向量地形分类（墙面成障、≤30° 坡面放行）+ Felzenszwalb 两遍 ESDF + 占据超时自愈（`plan_env`）
 - **全局规划**：JPS（Jump Point Search）+ 静态先验 PGM 地图（`sentry_global_planner`）
-- **局部规划**：Kinodynamic A* + 多项式 Shot 直达（`path_searching`）
-- **轨迹优化**：MINCO 五次多项式 + L-BFGS（NLopt），平滑/避障/可行性多目标
-- **轨迹跟踪**：50 Hz LDLT-MPC（10 步预测 horizon），独立 yaw 控制器（窄道对齐 / 开阔旋转）
-- **脱困恢复**：局部规划器内置状态机 reroute 角度扇 → ESDF 梯度后退 → 原地转向 → SAFE_IDLE
+- **局部规划**：Kinodynamic A* + 多项式 Shot 直达（`path_searching`）；ESDF 验收（薄障碍免疫）+ 失败部分路径打捞 + 搜索时间预算
+- **轨迹优化**：MINCO 五次多项式 + L-BFGS（NLopt），平滑/避障/可行性/单向逆行多目标
+- **轨迹跟踪**：50 Hz LDLT-MPC（10 步预测 horizon）+ 开阔地自转扫描；窄道/坡道对齐模式（迟滞触发，停自转、航向对齐、恒低速直穿）
+- **执行安全与脱困**：50 Hz 轨迹前瞻监控 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯（BRAKE 静置降级出口，无吸收态）；卡滞虚拟障碍注入侧移 + 窄道爬行兜底
+- **指令架构**：导航栈输出世界系速度 `/cmd_vel_world`，底盘侧（仿真 `chassis_cmd_node` / 真车电控 MCU）用高频陀螺 yaw 旋转到机体系——自转下 LIO yaw 有 50~70ms 龄期，不可用于 50Hz 旋转
+- **可通行性标注层**：离线 `.trav.yaml` 三态标注（free/obstacle/oneway），JPS 软代价 + A*/MINCO 硬约束，RViz 绘制插件（OPT-IN 默认关）
 - **仿真环境**：RMUC 2025 赛场（[`rm_sim_26`](https://github.com/Neomelt/rm_sim_26)）+ Livox 雷达 / IMU 桥接；支持 RGL（NVIDIA GPU 高精度 Mid360）与内置 `gpu_lidar` 双模式（`lidar_mode`）
 - **中间件**：推荐 `rmw_zenoh_cpp`，大点云吞吐与多机场景表现优于 DDS
 
@@ -38,24 +40,35 @@ sentry_nav_26/
 │   │   └── obj_predictor.cpp        # 动态物体预测占位
 │   │
 │   ├── path_searching/          # Kinodynamic A* + 多项式求解器
-│   │   ├── kinodynamic_astar.cpp    # 二阶动力学 A* + OBVP shot
-│   │   └── polynomial_solver.hpp    # 三/四次方程解析求根
+│   │   ├── kinodynamic_astar.cpp    # 二阶动力学 A* + OBVP shot + ESDF 验收/部分路径打捞
+│   │   ├── polynomial_solver.hpp    # 三/四次方程解析求根
+│   │   └── test/                    # A* 几何回归 gtest（薄带/死锁复刻/预算/豁免）
 │   │
 │   ├── sentry_global_planner/   # JPS 全局路径搜索
 │   │   ├── global_planner_node.cpp
-│   │   ├── jps_searcher.hpp         # JPS 算法实现
+│   │   ├── jps_searcher.hpp         # JPS 算法实现（含 oneway 软惩罚）
 │   │   └── global_map.hpp           # PGM 加载 + 静态 ESDF + OnlineMapProxy
 │   │
-│   ├── sentry_local_planner/    # MINCO + MPC 局部规划与控制
-│   │   ├── sentry_local_planner_node.cpp   # 顶层节点（2Hz replan + 50Hz control，多线程 executor）
+│   ├── sentry_local_planner/    # 局部规划 + 控制 + 执行安全
+│   │   ├── sentry_local_planner_node.cpp   # 顶层节点（10Hz 按需重规划 + 50Hz 控制）
+│   │   ├── chassis_cmd_node.cpp            # 仿真"底盘固件"：/cmd_vel_world → 陀螺 yaw 旋转 → /cmd_vel
 │   │   ├── minco_trajectory.cpp            # MINCO 轨迹生成 + L-BFGS 优化
-│   │   ├── trajectory_tracker.cpp          # MPC ↔ 轨迹接口
-│   │   └── mpc_controller.hpp              # LDLT 求解的二阶 MPC
+│   │   ├── trajectory_tracker.cpp          # MPC 跟踪 + 窄道/坡道对齐模式 + 爬行兜底
+│   │   ├── mpc_controller.hpp              # LDLT 求解的二阶 MPC
+│   │   ├── planner_fsm.hpp                 # IDLE/EXEC/SLOWDOWN/BRAKE 纯函数状态机
+│   │   ├── safety_monitor.hpp              # 执行中轨迹前瞻安全检查
+│   │   ├── chassis_yaw_estimator.hpp       # 陀螺积分 yaw + LIO 零漂校准（|wz| 门控）
+│   │   └── test/                           # FSM / 安全监控 / 对齐跟踪 / yaw 估计 gtest
+│   │
+│   ├── sentry_trav_rviz_plugin/ # RViz 可通行性标注绘制插件（导出 .trav.yaml）
 │   │
 │   └── sentry_msgs/             # 自定义 msg/srv/action 模板
 │
+├── docs/                        # TRAVERSABILITY.md / REVIEW.md / 台沿死锁根因取证报告与图表
+├── scripts/                     # podman-dev.sh 容器工作流 + diag/ 量化诊断脚本
 ├── test/                        # launch 集成测试占位
 ├── debug_planner.sh             # GDB 调试脚本
+├── Containerfile                # Podman 开发镜像定义
 ├── cyclonedds.xml               # 备用 CycloneDDS 配置（默认推荐 Zenoh）
 └── README.md
 ```
@@ -72,18 +85,21 @@ small_point_lio  ──►  /Odometry (高频位姿)
                   └►  /cloud_registered (世界系点云)
    │
    ├──► plan_env::SDFMap
-   │       ├─ 点云 / 激光 → log-odds occupancy
-   │       ├─ 滑窗 ESDF (Felzenszwalb 两遍可分离 EDT)
-   │       └─ 高程图 + 邻域坡度
+   │       ├─ 点云法向量分类 → log-odds occupancy (raycast 清除 + 占据超时)
+   │       └─ 滑窗 ESDF (Felzenszwalb 两遍可分离 EDT)
    │
-   ├──► sentry_global_planner (JPS, 静态先验地图)
+   ├──► sentry_global_planner (JPS, 静态先验地图 + 可通行性标注)
    │       └─ /global_path  (nav_msgs/Path)
    │
    └──► sentry_local_planner
            ├─ 订阅 /Odometry, /goal_pose, /global_path
-           ├─ KinodynamicAstar 在 EDTEnvironment 上搜索 (2Hz)
+           ├─ KinodynamicAstar 在 EDTEnvironment 上搜索 (10Hz 按需重规划)
            ├─ MINCO 五次轨迹 + L-BFGS 优化 (粗 8ms / 精 12ms)
-           └─ MPC 跟踪 (50Hz) ──►  /cmd_vel
+           └─ MPC / 对齐模式跟踪 (50Hz) ──►  /cmd_vel_world (odom 系)
+                                                │
+                                                ▼
+                              chassis_cmd_node (陀螺 yaw 旋转; 真车=电控 MCU)
+                                                └──►  /cmd_vel (机体系)
 ```
 
 ---
@@ -93,9 +109,10 @@ small_point_lio  ──►  /Odometry (高频位姿)
 ### 输入
 | 话题 | 类型 | 来源 |
 |---|---|---|
-| `/Odometry` | `nav_msgs/Odometry` | small_point_lio |
+| `/Odometry` | `nav_msgs/Odometry` | small_point_lio（含 ESKF twist 速度反馈）|
 | `/cloud_registered` | `sensor_msgs/PointCloud2` | small_point_lio |
 | `/goal_pose` | `geometry_msgs/PoseStamped` | RViz 2D Goal Pose |
+| `/chassis/imu` | `sensor_msgs/Imu` | 底盘 IMU（chassis_cmd_node 陀螺 yaw 积分）|
 
 ### 中间
 | 话题 | 类型 | 发布者 | 订阅者 |
@@ -107,7 +124,8 @@ small_point_lio  ──►  /Odometry (高频位姿)
 ### 输出
 | 话题 | 类型 | 用途 |
 |---|---|---|
-| `/cmd_vel` | `geometry_msgs/Twist` | 底盘速度命令 |
+| `/cmd_vel_world` | `geometry_msgs/Twist` | 世界系速度指令（规划器输出，`controller.cmd_frame: world` 默认）|
+| `/cmd_vel` | `geometry_msgs/Twist` | 机体系底盘命令（chassis_cmd_node 陀螺 yaw 旋转后转发）|
 | `/planning/trajectory` | `nav_msgs/Path` | 当前 MINCO 轨迹（可视化）|
 | `/planning/trajectory_markers` | `visualization_msgs/MarkerArray` | 调试可视化 |
 
@@ -155,8 +173,10 @@ git submodule update --init --recursive
 ```bash
 source /opt/ros/jazzy/setup.bash
 cd ~/sentry_nav_26
-colcon build --symlink-install
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
+
+> **必须显式指定 build type**：colcon 默认不传任何优化标志（等效 `-O0`），实测 A* 单次扩展 35~56ms、直接吃光重规划时间预算。`scripts/podman-dev.sh build` 已内置该参数。
 
 ### 4. 配置中间件（推荐 Zenoh）
 
@@ -219,7 +239,7 @@ xhost +SI:localuser:$(id -un)
 ```bash
 ./scripts/podman-dev.sh shell
 source install/setup.bash
-colcon build --symlink-install
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
 
 ### 4. 容器内运行仿真导航
@@ -311,12 +331,19 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 | 项 | 默认 | 说明 |
 |---|---|---|
 | `controller.frequency` | 50 Hz | MPC 控制频率 |
-| `replan.frequency` | 2 Hz | 轨迹重规划频率 |
+| `replan.frequency` | 10 Hz | 重规划**检查**频率；按需触发（无轨迹/偏差超限/目标移动/周期刷新），非每拍全量重规划 |
+| `search.max_vel / max_acc` | 3.0 / 2.0 | 动力学上限（acc 3.0 在 3 rad/s 自转下实测侧翻，降 2.0）|
+| `search.accept_clearance` | 0.28 m | A* ESDF 验收阈值 = robot_radius − res/2；阈值链 0.28 > warn 0.20 > hard 0.15 |
+| `search.max_search_time_ms` | 40 ms | A* 时间预算：目标不可达时防全域搜索拖死重规划 |
+| `safety.margin_warn / margin_hard` | 0.20 / 0.15 m | 执行监控分级阈值（warn 降速 / hard 迫近才刹停）|
+| `controller.corridor_enter/exit_dist` | 0.55 / 0.80 m | 窄道对齐模式进/出迟滞（前瞻 min-ESDF）|
+| `controller.slope_enter/exit_deg` | 7° / 4° | 坡道对齐模式进/出迟滞（机身倾角）|
+| `replan.crawl_fail_threshold` | 5 | 规划连败此数后开启窄道爬行兜底 |
 | `mpc.horizon` | 10 | 预测步数（horizon = N · dt = 0.2s）|
 | `mpc.q_pos / q_vel / r_acc` | 10 / 1 / 0.1 | MPC 状态/输入权重 |
 | `minco_opt.max_time_ms` | 20.0 | L-BFGS 总预算 (ms)，节点内 /1000（粗 40% / 精 60% → 8ms / 12ms）|
-| `minco_opt.dist0` / `dist0_vel_k` | 0.05 / 0.0 | footprint ESDF 安全阈值 + 速度相关裕度（dist0_eff = dist0 + k·\|v\|，默认 0=关闭）|
-| `search.max_vel / max_acc` | — | 动力学搜索的速度/加速度上限 |
+| `minco_opt.dist0` / `dist0_vel_k` | 0.30 / 0.0 | footprint ESDF 软间隙（有余地时主动留 0.3m）+ 速度相关裕度（dist0_eff = dist0 + k·\|v\|，0=关闭）|
+| `minco_opt.lambda_oneway` | 8.0 | 单向标注区逆行软代价权重 |
 
 ### 全局规划器（`sentry_global_planner/config/global_planner_params.yaml`）
 
@@ -326,6 +353,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 | `jps.safety_dist` | 0.3 m | ESDF 小于此值视为不可通行 |
 | `jps.esdf_weight` | 2.0 | ESDF 代价权重，越大越远离障碍 |
 | `jps.waypoint_spacing` | 1.0 m | 简化后路径点最小间距 |
+| `jps.oneway_penalty` | 50.0 | ONEWAY 标注区逆向软惩罚（代价乘子增量，不硬挡保连通）|
 
 ### 在线建图（`plan_env`，由 launch 注入）
 
@@ -333,11 +361,12 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 |---|---|---|
 | `sdf_map.resolusion_` | 0.05 m | 体素分辨率（**注意 yaml 里键名拼写**）|
 | `sdf_map.local_update_range_x/y` | 8.0 m | 局部窗口半径（planner_params.yaml 注入值；代码 declare 默认 3.0）|
-| `sdf_map.obstacles_inflation` | 0.05 m | 膨胀半径（代码 declare 默认 0.0009）|
-| `sdf_map.max_slope_deg` | 17° | 高程坡度阈值（超阈值写入 occupancy）|
-| `sdf_map.step_height_max` | 0.08 m | 可通行台阶高度（超阈值写入 occupancy）|
-| `sdf_map.cloud_min/max_height` | -0.2 / 0.8 m | 相对车体 z 的点云高度窗口 |
+| `sdf_map.obstacles_inflation` | 0.05 m | 膨胀半径，仅做噪声平滑（车体安全由规划器 ESDF 验收负责）|
+| `sdf_map.max_slope_deg` | 30° | 法向量坡度判定：≤30° 斜面放行，墙面/立面 \|n.z\|≈0 成障 |
+| `sdf_map.normal_voxel_leaf / normal_k` | 0.08 m / 10 | 法向量估计前体素降采样 + kNN 邻域点数 |
+| `sdf_map.cloud_min/max_height` | -0.2 / 0.15 m | 相对机身 z 的判障带：只取机身高度附近表面，高处平台/桥面不在带内 |
 | `sdf_map.logodds_*` | hit 0.85 / miss -0.4 | 贝叶斯更新参数 |
+| `sdf_map.occ_timeout` | 3.5 s | 占据超时清除：超时未再命中的格子视为空闲（自转幽灵障碍自愈）|
 
 ---
 
@@ -371,12 +400,12 @@ ros2 launch sentry_bringup bringup.launch.py \
 |---|---|---|
 | LIO 定位 | ✅ | 通过 submodule |
 | 在线 2D occupancy + ESDF | ✅ | log-odds + Felzenszwalb |
-| 高程图 / 坡度估计 | 🟡 | `elevation_buffer_` + 邻域坡度/台阶检测已实现，超阈值会膨胀写入 occupancy log-odds（**进入代价**，sensor_processor.cpp Pass 2）；高位雷达下地面点稀疏，特征常处于数据饥饿 |
+| 点云法向量地形分类 | ✅ | 法向量 \|n.z\| 判墙面/坡面（≤30° 放行），替代高程差判定——自转误配准保朝向不保位移，法向量对误配准鲁棒（幽灵障碍 31→0）；raycast 清除 + 占据超时自愈 |
 | 多层占用（狗洞净空检测）| ❌ | 未实现 |
 | 时间衰减体素 (STVL) | ❌ | log-odds 永久累积，无衰减 |
 | 视锥清除 | ❌ | 未实现 |
-| 可通行性融合层 | ❌ | 未实现 |
-| 可通行性标注层（单向/方向）| 🟡 | 静态离线标注；OPT-IN 默认关（`regions: []` 即 disabled）；全局软代价 + 局部 A*/MINCO 硬约束；详见 `docs/TRAVERSABILITY.md` |
+| 可通行性融合层 | ❌ | 未实现（occupancy + slope + clearance + roughness 在线融合）|
+| 可通行性标注层（单向/方向）| ✅ | `.trav.yaml`（free/obstacle/oneway）贯穿 JPS 软代价 / A*+MINCO 硬约束；RViz 标注插件；OPT-IN 默认关（`regions: []` 即 disabled），详见 `docs/TRAVERSABILITY.md` |
 | 全局规划 (JPS, 静态先验) | ✅ | 完整可用 |
 | 全局规划在线模式 | 🟡 | `OnlineMapProxy` 已接入 JPS（global_planner_node.cpp `online` 分支），但未端到端验证；直接启用会因缺 `sdf_map.*` 参数崩溃，需先补参数接线 |
 | Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF 验收（accept_clearance 0.28，薄障碍免疫）+ near_end 失败继续搜 + 部分路径打捞 + 搜索时间预算 + 可通行性标注检查（obstacle/oneway）|
@@ -384,7 +413,7 @@ ros2 launch sentry_bringup bringup.launch.py \
 | MPC 跟踪 | ✅ | LDLT，软约束 |
 | 执行中轨迹安全监控 | ✅ | 50Hz 前瞻检查 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯 + BRAKE 静置超时出口（gtest + RMUC 仿真验证）|
 | 窄道/坡道对齐模式 | ✅ | 前瞻 min-ESDF/倾角触发（迟滞），停自转+航向对齐+纯追踪恒速直穿；爬行兜底 |
-| 可通行性标注层 | ✅ | .trav.yaml（free/obstacle/oneway）贯穿 JPS/A*/MINCO；RViz 标注插件 |
+| 世界系指令 + 底盘 yaw 下沉 | ✅ | `/cmd_vel_world` → chassis_cmd_node 高频陀螺积分 yaw 旋转（真车由电控 MCU 替代同一逻辑）|
 | RMUC 仿真 | ✅ | submodule 提供 |
 | 真车适配 | 🟡 | 需替换 LIO 输入话题 + map→odom 全局定位 |
 
@@ -414,7 +443,7 @@ ros2 launch sentry_bringup bringup.launch.py \
 - MINCO 时间-轨迹联合优化
 - MPC 升级到带不等式硬约束的 QP（OSQP）
 - ROS 2 LifecycleNode 改造，支持运行时重配置
-- 算法层 gtest 覆盖
+- ~~算法层 gtest 覆盖~~ ✅ A* 几何回归 / FSM / 安全监控 / 对齐跟踪 / yaw 估计已覆盖（46 用例）；整机 launch 集成测试待补
 
 ---
 
@@ -424,8 +453,10 @@ ros2 launch sentry_bringup bringup.launch.py \
 - 点云密度过大会拖慢 ESDF（20 Hz timer），可在 LIO 输出端做下采样
 - Zenoh 模式下若发现节点互相发现不到，先确认 `rmw_zenohd` router 已启动
 - 若 RViz 看到 `/sdf_map/esdf` 不连续：通常是滑窗边界，正常现象
-- 真车上线前：删除 `sim_test.launch.py` 里的静态 `map→odom` TF（bringup 经 sim_test 引入），接入 AMCL 或视觉定位
+- 真车上线前：删除 `sim_test.launch.py` 里的静态 `map→odom` TF（bringup 经 sim_test 引入），接入 AMCL 或视觉定位；`chassis_cmd_node` 由电控 MCU 固件替代
 - 若局部规划器 NaN 崩溃：通常是 `solveQuintic` 输入 waypoints 过于贴近，检查 A* 输出去重
+- 机器人趴窝先 grep 阶段归因日志：规划失败必有 `Plan stage A*/sampling/MINCO` 与 A* 失败原因（budget/open-empty/allocate）输出，静默无日志本身就是 bug
+- 性能异常（规划超预算）先确认 build type：`grep -- -O build/<pkg>/CMakeFiles/*/flags.make`，colcon 默认无优化标志
 
 ---
 
@@ -433,6 +464,8 @@ ros2 launch sentry_bringup bringup.launch.py \
 
 - [Fast-Planner](https://github.com/HKUST-Aerial-Robotics/Fast-Planner) — kinodynamic A* / EDTEnvironment 设计参考
 - [EGO-Planner](https://github.com/ZJU-FAST-Lab/ego-planner) — MINCO 轨迹优化思路
+- [rose_navigation](https://github.com/hyheiyue/rose_navigation) — clearance 软代价、局部性重规划、窄道 turtle 模式与路径切向 yaw 参考等哨兵导航实践参考
+- [中国科学技术大学 RoboWalker 哨兵导航技术报告 (RM2025)](https://bbs.robomaster.com/article/803740) — 哨兵导航整体方案与工程实践参考
 - [STVL](https://github.com/SteveMacenski/spatio_temporal_voxel_layer) — 时间衰减体素栅格设计参考
 - [ROG-Map](https://github.com/hku-mars/ROG-Map) — ESDF / 膨胀图实现参考
 - [Small Point-LIO](https://github.com/Aurora-UJS/small_point_lio) — LIO 定位
