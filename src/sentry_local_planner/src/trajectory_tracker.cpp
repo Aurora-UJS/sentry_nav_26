@@ -131,9 +131,42 @@ geometry_msgs::msg::Twist TrajectoryTracker::computeAlignCmd(
         lk = p;
     }
 
-    Eigen::Vector2d dir = lk - pos;
+    // 前瞻点向脊线推移后按对齐策略输出
+    nudgeToRidge(lk);
+    return alignCmdToward(pos, yaw, lk);
+}
+
+geometry_msgs::msg::Twist TrajectoryTracker::computeCrawl(
+    const Eigen::Vector2d &pos, double yaw, Eigen::Vector2d target)
+{
+    nudgeToRidge(target);
+    return alignCmdToward(pos, yaw, target);
+}
+
+void TrajectoryTracker::nudgeToRidge(Eigen::Vector2d &p) const
+{
+    // 目标点向 ESDF 脊线（缝中心线）推移: MINCO 的软间隙代价在 esdf<dist0
+    // 后已无区分度，缝内轨迹可能偏离中心；直穿时跟最大间隙线更稳
+    if (!env_ || !env_->isInMap(p))
+        return;
+    for (int i = 0; i < 3; ++i)
+    {
+        double d;
+        Eigen::Vector2d g;
+        env_->evaluateEDTWithGrad(p, -1.0, d, g);
+        if (d >= cfg_.corridor_enter_dist || g.norm() < 1e-3)
+            break;
+        p += g.normalized() * 0.05;
+    }
+}
+
+geometry_msgs::msg::Twist TrajectoryTracker::alignCmdToward(
+    const Eigen::Vector2d &pos, double yaw, const Eigen::Vector2d &target) const
+{
+    geometry_msgs::msg::Twist cmd;
+    Eigen::Vector2d dir = target - pos;
     if (dir.norm() < 0.05)
-        return cmd;  // 已贴近轨迹末端: 停车等下一条轨迹
+        return cmd;  // 已贴近目标: 停车
     dir.normalize();
 
     // 航向对齐: 折到 [-π/2, π/2] —— 车头或车尾对齐皆可（前后对称），不侧行

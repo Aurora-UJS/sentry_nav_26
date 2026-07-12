@@ -34,6 +34,7 @@ enum class FsmEvent
     UNSAFE_TIMEOUT,        // SLOWDOWN 持续超时仍未修复
     TRAJ_FINISHED,         // 轨迹时间执行完毕
     GOAL_REACHED,          // 到达最终目标
+    BRAKE_SETTLED,         // 刹停完成（静置且速度≈0）：降级 IDLE 重新找路
 };
 
 /** 纯状态转移函数：不产生副作用，动作由调用方依据 (旧状态, 新状态) 执行 */
@@ -64,6 +65,12 @@ constexpr FsmState fsmTransition(FsmState s, FsmEvent e)
 
     case FsmEvent::UNSAFE_TIMEOUT:
         return (s == FsmState::SLOWDOWN) ? FsmState::BRAKE : s;
+
+    case FsmEvent::BRAKE_SETTLED:
+        // BRAKE 的失败出口: 原先只有 PLAN_SUCCESS/GOAL_REACHED 可退出，
+        // 规划连败即永久死锁（台沿实证 762 次失败 840s 冻结），且挂在
+        // IDLE 分支的兜底行为（窄道爬行）永不可达
+        return (s == FsmState::BRAKE) ? FsmState::IDLE : s;
     }
     return s;
 }

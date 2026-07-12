@@ -131,6 +131,7 @@ sentry_local_planner:
       refresh_period: 1.0         # 周期性提质刷新间隔 (s)
       plan_lead: 0.15             # 续接点前瞻量 (s)，覆盖一次规划耗时
       goal_clearance: 0.45        # 局部目标最小 ESDF 间隙 (m)：钉在墙皮上的 pursuit 点先推开再给 A*
+      crawl_fail_threshold: 5     # 规划连败此数后开启窄道爬行兜底（配合窄区 esdf 触发）
       jps_lookahead: 2.5          # JPS 路径加密跟随: 局部目标取路径前方此弧长处 (m)。
                                   # 局部图看不见坑/跌落(负障碍)，稀疏 waypoint 间自由规划会抄近路
                                   # 穿过先验图才知道的坑(实测卡死)；贴 JPS 路径走则没有抄近路空间
@@ -155,6 +156,10 @@ sentry_local_planner:
       imminent_time: 0.8          # 硬不安全点距今小于此值 → 直接刹停 (3m/s 全减速需 1s/1.5m)
       slowdown_factor: 0.4        # SLOWDOWN 状态线速度缩放
       brake_timeout: 0.5          # 硬不安全持续超时仍未修复 → 刹停 (s)，覆盖 ~5 个重规划周期
+      # BRAKE 失败出口: 刹停静置后降级 IDLE 重新找路。BRAKE 原先只有规划成功
+      # 一条出路，规划连败即永久死锁（台沿实证 762 次失败 840s 冻结）
+      brake_settle_time: 1.0      # 进 BRAKE 静置多久判刹停完成 (s)
+      brake_settle_vel: 0.1       # 静置速度阈值 (m/s)；坡上滑动时不降级
 
     # --- MINCO 梯度优化参数 ---
     minco_opt:

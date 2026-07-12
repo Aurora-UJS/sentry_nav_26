@@ -63,3 +63,16 @@ TEST(PlannerFsm, UnsafeEventsIgnoredOutsideExecution)
     // 已在降速中再次报 TRAJ_UNSAFE 保持降速
     EXPECT_EQ(fsmTransition(FsmState::SLOWDOWN, FsmEvent::TRAJ_UNSAFE), FsmState::SLOWDOWN);
 }
+
+TEST(PlannerFsm, BrakeSettledExitsToIdle)
+{
+    // BRAKE 的失败出口: 刹停完成降级 IDLE 重新找路（防规划连败永久死锁）
+    EXPECT_EQ(fsmTransition(FsmState::BRAKE, FsmEvent::BRAKE_SETTLED), FsmState::IDLE);
+}
+
+TEST(PlannerFsm, BrakeSettledIgnoredOutsideBrake)
+{
+    EXPECT_EQ(fsmTransition(FsmState::IDLE, FsmEvent::BRAKE_SETTLED), FsmState::IDLE);
+    EXPECT_EQ(fsmTransition(FsmState::EXEC, FsmEvent::BRAKE_SETTLED), FsmState::EXEC);
+    EXPECT_EQ(fsmTransition(FsmState::SLOWDOWN, FsmEvent::BRAKE_SETTLED), FsmState::SLOWDOWN);
+}

@@ -79,6 +79,14 @@ public:
     bool inNarrowMode() const { return narrow_on_; }
     bool inSlopeMode() const { return slope_on_; }
 
+    /**
+     * 窄道直穿兜底指令: 无轨迹时朝给定目标点爬行（对齐折向 + 恒速 + 脊线纠偏）。
+     * 供节点在"规划失败但静态验证的全局路径仍在"时沿 JPS 路径硬穿窄口 —
+     * 活图噪声让 A* footprint 无路时，规划管线出不来轨迹，兜底不依赖它。
+     */
+    geometry_msgs::msg::Twist computeCrawl(
+        const Eigen::Vector2d &pos, double yaw, Eigen::Vector2d target);
+
 private:
     /** 迟滞状态机: 更新 narrow_on_ / slope_on_ */
     void updateMode(const Eigen::Vector2d &pos, double tilt,
@@ -88,6 +96,13 @@ private:
     geometry_msgs::msg::Twist computeAlignCmd(
         const Eigen::Vector2d &pos, double yaw,
         const MincoTrajectory &traj, double elapsed);
+
+    /** 目标点沿 ESDF 梯度推向脊线 (缝中心线) */
+    void nudgeToRidge(Eigen::Vector2d &p) const;
+
+    /** 朝 target 方向: 对齐(折±90°)后恒速 / 未对齐爬行, 世界/机体系输出 */
+    geometry_msgs::msg::Twist alignCmdToward(
+        const Eigen::Vector2d &pos, double yaw, const Eigen::Vector2d &target) const;
 
     Config cfg_;
     MPCController mpc_;

@@ -20,6 +20,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <memory>
+#include <optional>
 #include <mutex>
 
 #include <plan_env/sdf_map.hpp>
@@ -145,6 +146,8 @@ public:
         this->declare_parameter<double>("safety.imminent_time", 0.8);
         this->declare_parameter<double>("safety.slowdown_factor", 0.4);
         this->declare_parameter<double>("safety.brake_timeout", 0.5);
+        this->declare_parameter<double>("safety.brake_settle_time", 1.0);
+        this->declare_parameter<double>("safety.brake_settle_vel", 0.1);
         safety_check_horizon_ = this->get_parameter("safety.check_horizon").as_double();
         safety_check_dt_      = this->get_parameter("safety.check_dt").as_double();
         safety_margin_warn_   = this->get_parameter("safety.margin_warn").as_double();
@@ -154,6 +157,8 @@ public:
         safety_imminent_time_ = this->get_parameter("safety.imminent_time").as_double();
         slowdown_factor_      = this->get_parameter("safety.slowdown_factor").as_double();
         brake_timeout_        = this->get_parameter("safety.brake_timeout").as_double();
+        brake_settle_time_    = this->get_parameter("safety.brake_settle_time").as_double();
+        brake_settle_vel_     = this->get_parameter("safety.brake_settle_vel").as_double();
 
         // --- 按需重规划参数 ---
         this->declare_parameter<double>("replan.deviation", 0.5);
@@ -161,11 +166,13 @@ public:
         this->declare_parameter<double>("replan.plan_lead", 0.15);
         this->declare_parameter<double>("replan.jps_lookahead", 2.5);
         this->declare_parameter<double>("replan.goal_clearance", 0.45);
+        this->declare_parameter<int>("replan.crawl_fail_threshold", 5);
         replan_deviation_      = this->get_parameter("replan.deviation").as_double();
         replan_refresh_period_ = this->get_parameter("replan.refresh_period").as_double();
         replan_plan_lead_      = this->get_parameter("replan.plan_lead").as_double();
         jps_lookahead_         = this->get_parameter("replan.jps_lookahead").as_double();
         goal_clearance_        = this->get_parameter("replan.goal_clearance").as_double();
+        crawl_fail_threshold_  = this->get_parameter("replan.crawl_fail_threshold").as_int();
 
         // --- 卡滞检测参数 ---
         this->declare_parameter<double>("stuck.timeout", 0.8);
@@ -173,6 +180,7 @@ public:
         stuck_timeout_     = this->get_parameter("stuck.timeout").as_double();
         stuck_inject_dist_ = this->get_parameter("stuck.inject_dist").as_double();
         world_frame_cmd_   = tcfg.world_frame_cmd;
+        corridor_enter_dist_ = tcfg.corridor_enter_dist;
 
         // --- Subscribers ---
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -296,8 +304,9 @@ private:
 
         if (next == FsmState::BRAKE)
         {
-            // 刹停即放弃当前轨迹；后续恢复只能靠新的 PLAN_SUCCESS
+            // 刹停即放弃当前轨迹；恢复靠 PLAN_SUCCESS 或静置超时降级 IDLE
             setActiveTraj(nullptr);
+            brake_since_ = this->now();
             RCLCPP_WARN(this->get_logger(), "Trajectory dropped, braking");
         }
 
@@ -312,6 +321,7 @@ private:
         if (!has_odom_) { RCLCPP_WARN(this->get_logger(), "No odom yet"); return; }
         final_goal_ = Eigen::Vector2d(msg->pose.position.x, msg->pose.position.y);
         has_final_goal_ = true;
+        consec_plan_fail_ = 0;
         // 旧目标的全局路径立即作废，等全局规划器发新路径（否则沿旧路走会静默偏航）
         has_global_path_ = false;
         global_waypoints_.clear();
@@ -363,13 +373,75 @@ private:
         return path.back();
     }
 
+    /**
+     * 窄道直穿兜底指令（仅 IDLE 且有目标时调用）。
+     * 触发条件: 在窄区内 (esdf < corridor_enter) 且 JPS 静态验证路径可跟。
+     * 安全分层: 静态层保证基准可行性（标注间隙 ≥ 车宽，JPS 发布前已验证
+     * min-clearance）；活图沿爬行线做硬保护 —— 低于 margin_hard 视为真堵死
+     * （新障碍/对方机器人），停住等待，交给 occ_timeout 自愈或上层换路。
+     */
+    std::optional<geometry_msgs::msg::Twist> narrowCrawlCmd()
+    {
+        if (!has_final_goal_ || !has_global_path_ || global_waypoints_.size() < 2)
+        {
+            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                  "Crawl skip: goal=%d path=%zu", has_final_goal_,
+                                  global_waypoints_.size());
+            return std::nullopt;
+        }
+        // 触发: 在窄区内 (esdf < corridor_enter)，或规划连败但全局路径仍在
+        // （目标被围/幽灵格封路时机器人可能停在开阔处）
+        bool in_narrow = edt_env_->isInMap(current_pos_) &&
+                         edt_env_->getDistance(current_pos_) < corridor_enter_dist_;
+        if (!in_narrow && consec_plan_fail_ < crawl_fail_threshold_)
+        {
+            RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                  "Crawl skip: esdf %.2f open, fails %d/%d",
+                                  edt_env_->getDistance(current_pos_),
+                                  consec_plan_fail_, crawl_fail_threshold_);
+            return std::nullopt;
+        }
+
+        Eigen::Vector2d target =
+            pursuitPointOnPath(global_waypoints_, current_pos_, 0.6);
+        Eigen::Vector2d d = target - current_pos_;
+        double len = d.norm();
+        if (len < 0.05)
+            return std::nullopt;
+        d /= len;
+        // 爬行线活图硬保护（近端豁免机器人自身已占据区域）
+        for (double s = 0.15; s <= len; s += 0.05)
+        {
+            Eigen::Vector2d p = current_pos_ + d * s;
+            if (!edt_env_->isInMap(p) || edt_env_->getDistance(p) < safety_margin_hard_)
+            {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                     "Narrow crawl blocked at (%.2f, %.2f) esdf<%.2f - waiting",
+                                     p(0), p(1), safety_margin_hard_);
+                return std::nullopt;
+            }
+        }
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "Narrow crawl along global path toward (%.2f, %.2f)",
+                             target(0), target(1));
+        return tracker_.computeCrawl(current_pos_, current_yaw_, target);
+    }
+
     void dispatchPlanResult(PlanResult res)
     {
         if (res == PlanResult::SUCCESS)
+        {
+            consec_plan_fail_ = 0;
             dispatch(FsmEvent::PLAN_SUCCESS);
+        }
         else if (res == PlanResult::FAILED)
         {
+            ++consec_plan_fail_;  // SKIPPED 不计: 那是"没尝试"不是"失败"
             dispatch(FsmEvent::PLAN_FAIL);
+            // IDLE 也要出声: 曾因此静默失败 160s 无从诊断（夹口 A* 无路趴窝）
+            if (state_ == FsmState::IDLE)
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                     "Replan failed, state=IDLE (robot parked)");
             if (state_ != FsmState::IDLE)
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                                      "Replan failed, state=%s",
@@ -380,9 +452,10 @@ private:
     PlanResult planToGoal(Eigen::Vector2d goal_pt)
     {
         Eigen::Vector2d diff = goal_pt - current_pos_;
-        // A* near_end tolerance = ceil(1/resolution_astar) * resolution_astar ≈ 1.0m
-        // 不要在这个范围内重规划，让最后一段轨迹自然执行完
-        if (diff.norm() < 1.0) return PlanResult::SKIPPED;
+        // 执行中让最后一段轨迹自然跑完（near_end 邻域内不打断）；
+        // 无轨迹（IDLE/BRAKE 后）必须照常规划——旧版无条件 SKIPPED 会让
+        // 近距目标（如隔台沿 0.87m 的 pursuit 点）永远不被尝试
+        if (diff.norm() < 1.0 && getActiveTraj()) return PlanResult::SKIPPED;
 
         double local_range = 7.5;
         this->get_parameter("sdf_map.local_update_range_x", local_range);
@@ -442,12 +515,26 @@ private:
         kino_astar_->reset();
         int result = kino_astar_->search(start_pos, start_vel, start_acc,
                                           goal_pt, Eigen::Vector2d::Zero(), true);
-        if (result == KinodynamicAstar::NO_PATH) return PlanResult::FAILED;
+        if (result == KinodynamicAstar::NO_PATH)
+        {
+            // 阶段归因: 失败必须可诊断（曾静默失败 762 次无从归因）
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Plan stage A*: NO_PATH, start(%.2f,%.2f) -> goal(%.2f,%.2f) esdf %.2f",
+                                 start_pos(0), start_pos(1), goal_pt(0), goal_pt(1),
+                                 sdf_map_->getDistance(goal_pt));
+            return PlanResult::FAILED;
+        }
 
         double ts;
         std::vector<Eigen::Vector2d> point_set, start_end_derivatives;
         kino_astar_->getSamples(ts, point_set, start_end_derivatives);
-        if (point_set.size() < 2) return PlanResult::FAILED;
+        if (point_set.size() < 2)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Plan stage sampling: %zu points (A* status %d)",
+                                 point_set.size(), result);
+            return PlanResult::FAILED;
+        }
 
         // MINCO
         double max_vel = 3.0, max_acc = 3.0;
@@ -460,7 +547,13 @@ private:
         Eigen::Vector2d ea = start_end_derivatives.size() >= 4 ? start_end_derivatives[3] : Eigen::Vector2d::Zero();
 
         minco_traj_.setup(point_set, sv, sa, ev, ea, max_vel, max_acc, this->now().seconds());
-        if (minco_traj_.empty()) return PlanResult::FAILED;
+        if (minco_traj_.empty())
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Plan stage MINCO: empty trajectory from %zu points (A* status %d)",
+                                 point_set.size(), result);
+            return PlanResult::FAILED;
+        }
 
         auto snap = std::make_shared<TrajSnapshot>();
         snap->traj = minco_traj_;  // 值拷贝进只读快照，工作对象后续改写不影响控制回路
@@ -589,6 +682,12 @@ private:
         switch (state_)
         {
         case FsmState::BRAKE:
+            // 刹停完成后降级 IDLE: BRAKE 不能是吸收态——规划连败时唯一的
+            // 恢复路径是回到 IDLE 让兜底行为（窄道爬行）接管（台沿死锁实证）
+            if (has_final_goal_ &&
+                (this->now() - brake_since_).seconds() > brake_settle_time_ &&
+                current_vel_.norm() < brake_settle_vel_)
+                dispatch(FsmEvent::BRAKE_SETTLED);
             break;  // 零指令刹停（阶梯的底）
 
         case FsmState::EXEC:
@@ -611,8 +710,21 @@ private:
             [[fallthrough]];  // 快照已失效：退回无轨迹行为
 
         case FsmState::IDLE:
+            // 僵尸目标清理: BRAKE 下轨迹恒空，GOAL_REACHED 在轨迹结束路径里
+            // 实际不可达；BRAKE_SETTLED 降级到这里后目标已在脚下时直接收尾
+            if (has_final_goal_ && !snap && (final_goal_ - current_pos_).norm() < 1.0)
+            {
+                RCLCPP_INFO(this->get_logger(), "Goal reached (idle)");
+                has_final_goal_ = false;
+                break;
+            }
             cmd = tracker_.compute(current_pos_, current_vel_, current_yaw_, current_tilt_,
                                    empty_traj_, 0.0, false);
+            // 窄道直穿兜底: 活图有效间隙 ∈ (margin_hard, accept_clearance) 的
+            // 通道 A* 判死、爬行硬保护判活 —— 规划管线出不来轨迹时沿静态验证
+            // 过间隙的 JPS 路径爬行硬穿，防原地趴窝（实测 545s 静止）。
+            if (auto crawl = narrowCrawlCmd())
+                cmd = *crawl;
             break;
         }
         cmd_vel_pub_->publish(cmd);
@@ -630,7 +742,10 @@ private:
         // 卡滞检测（本体感知）：指令在动而车没动 → 被雷达扫不到的小坎/异物顶住。
         // 感知层对低矮障碍与负障碍天然盲，唯一可靠信号就是"推不动"本身。
         // 处置：在受阻方向注入虚拟障碍块 → A* 自然侧移绕行；occ_timeout 自动过期。
-        if (state_ == FsmState::EXEC || state_ == FsmState::SLOWDOWN)
+        // 窄道对齐模式内禁用：缝里推不动时往前方注障碍会堵死唯一通路
+        // （实测 8 次注入聚在夹口 → A* 无路可绕 → BRAKE 风暴），蹭墙慢挤优于自堵。
+        if ((state_ == FsmState::EXEC || state_ == FsmState::SLOWDOWN) &&
+            !tracker_.inAlignMode())
         {
             double cmd_norm = std::hypot(cmd.linear.x, cmd.linear.y);
             if (cmd_norm > 0.15 && current_vel_.norm() < 0.08)
@@ -717,6 +832,12 @@ private:
     double current_yaw_ = 0.0;
     double current_tilt_ = 0.0;
     bool align_mode_prev_ = false;
+    double corridor_enter_dist_ = 0.55;
+    double brake_settle_time_ = 1.0;
+    double brake_settle_vel_ = 0.1;
+    rclcpp::Time brake_since_{0, 0, RCL_ROS_TIME};
+    int consec_plan_fail_ = 0;
+    int crawl_fail_threshold_ = 5;
     bool has_odom_ = false;
     Eigen::Vector2d last_odom_pos_ = Eigen::Vector2d::Zero();
     double last_odom_time_ = -1.0;

@@ -26,7 +26,7 @@ public:
                              double &d, Eigen::Vector2d &grad) override
     {
         d = dist;
-        grad = Eigen::Vector2d(0.0, 1.0);
+        grad = Eigen::Vector2d::Zero();  // 恒定距离场梯度为零
     }
     double evaluateCoarseEDT(const Eigen::Vector2d &, double) override { return dist; }
     bool hasDynamicObjects() const override { return false; }
@@ -212,5 +212,58 @@ TEST(TrackerMode, PurePursuitSteersBackToPath)
     // 机器人偏在轨迹 (y=0) 上方 0.3m → 指令应含向 -y 的纠偏分量
     auto cmd = tracker.compute({0.5, 0.3}, kZeroV, 0.0, 0.0, traj, 0.5, true);
     EXPECT_LT(cmd.linear.y, -0.05);
+    EXPECT_GT(cmd.linear.x, 0.0);
+}
+
+namespace
+{
+
+/** 沿 x 走廊: 墙在 y=±half, ESDF = half-|y|, 梯度指向中心线 (脊线 y=0) */
+class CorridorEnv : public ConstEnv
+{
+public:
+    double half = 0.45;
+
+    double getDistance(const Eigen::Vector2d &p) override
+    {
+        return std::max(0.0, half - std::fabs(p.y()));
+    }
+    void evaluateEDTWithGrad(const Eigen::Vector2d &p, double,
+                             double &d, Eigen::Vector2d &grad) override
+    {
+        d = getDistance(p);
+        grad = Eigen::Vector2d(0.0, p.y() > 0 ? -1.0 : (p.y() < 0 ? 1.0 : 0.0));
+    }
+};
+
+} // namespace
+
+TEST(TrackerMode, CrawlTowardTargetWithRidgeNudge)
+{
+    CorridorEnv env;  // 走廊中心线 y=0, 半宽 0.45
+    auto tracker = makeTracker(env);
+
+    // 无轨迹兜底爬行: 目标在前方偏离中心线 (y=-0.2)，指令应向前且被脊线拉回中心
+    auto cmd = tracker.computeCrawl({0.5, -0.2}, 0.0, {1.1, -0.2});
+    double speed = std::hypot(cmd.linear.x, cmd.linear.y);
+    EXPECT_NEAR(speed, 0.8, 1e-6);  // 已对齐 → 恒速
+    EXPECT_GT(cmd.linear.x, 0.5);
+    EXPECT_GT(cmd.linear.y, 0.05);  // 脊线纠偏分量
+}
+
+TEST(TrackerMode, RidgeNudgeSteersTowardCorridorCenter)
+{
+    CorridorEnv env;  // 走廊中心线 y=0, 半宽 0.45 (< enter 0.55 → 窄道模式)
+    auto tracker = makeTracker(env);
+
+    // 轨迹偏离中心线 (沿 y=-0.2): 前瞻点应被 ESDF 梯度推向脊线 → 指令含 +y 分量
+    MincoTrajectory traj;
+    std::vector<Eigen::Vector2d> wps = {{0.0, -0.2}, {1.5, -0.2}, {3.0, -0.2}};
+    traj.setup(wps, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
+               Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(), 1.0, 1.0, -1.0);
+
+    auto cmd = tracker.compute({0.5, -0.2}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    EXPECT_TRUE(tracker.inNarrowMode());
+    EXPECT_GT(cmd.linear.y, 0.05);  // 向走廊中心纠偏
     EXPECT_GT(cmd.linear.x, 0.0);
 }
