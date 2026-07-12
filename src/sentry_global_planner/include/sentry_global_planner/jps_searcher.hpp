@@ -274,15 +274,19 @@ private:
             i = farthest;
         }
 
-        // Enforce minimum waypoint spacing
+        // Enforce minimum waypoint spacing.
+        // 注意: 只有当"跳过本点后新连线仍有安全视线"时才允许丢弃 —
+        // 原实现按间距无条件丢角点，产生从未检查过的切角捷径
+        // (实测输出过沿线 0 间隙的路径，机器人跟着它卡死在夹道里)。
         std::vector<Eigen::Vector2d> spaced;
         spaced.push_back(simplified.front());
-        for (size_t k = 1; k < simplified.size(); ++k)
+        for (size_t k = 1; k + 1 < simplified.size(); ++k)
         {
             if ((simplified[k] - spaced.back()).norm() >= waypoint_spacing_ ||
-                k == simplified.size() - 1)
+                !hasLineOfSight(spaced.back(), simplified[k + 1]))
                 spaced.push_back(simplified[k]);
         }
+        spaced.push_back(simplified.back());
         path = spaced;
     }
 

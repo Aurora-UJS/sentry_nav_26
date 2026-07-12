@@ -24,6 +24,7 @@ public:
         this->declare_parameter<double>("jps.esdf_weight", 2.0);
         this->declare_parameter<double>("jps.safety_dist", 0.3);
         this->declare_parameter<double>("jps.waypoint_spacing", 1.0);
+        this->declare_parameter<double>("jps.push_clearance", 0.6);
         this->declare_parameter<std::string>("manager.odometry", "/Odometry");
     }
 
@@ -69,6 +70,7 @@ public:
             this->get_parameter("jps.esdf_weight").as_double(),
             this->get_parameter("jps.safety_dist").as_double(),
             this->get_parameter("jps.waypoint_spacing").as_double());
+        push_clearance_ = this->get_parameter("jps.push_clearance").as_double();
 
         // Subscribers
         std::string odom_topic = this->get_parameter("manager.odometry").as_string();
@@ -126,6 +128,8 @@ private:
         RCLCPP_INFO(this->get_logger(), "Global JPS: %zu waypoints, %.1fms",
                     path.size(), (t1 - t0).seconds() * 1000.0);
 
+        pushAwayFromObstacles(path);
+
         // Publish path
         nav_msgs::msg::Path path_msg;
         path_msg.header.stamp = this->now();
@@ -142,6 +146,60 @@ private:
 
         // Publish waypoint markers
         publishWaypoints(path);
+    }
+
+    /**
+     * 路径推离后处理: JPS 是最短路，天生贴墙切角。局部规划器沿它走时轨迹
+     * 前方 esdf 常掉进安全监控的 warn/hard 区间 (实测 0.07~0.18m)，触发
+     * SLOWDOWN/BRAKE 蠕动。把每个中间 waypoint 沿先验 ESDF 数值梯度外推到
+     * push_clearance，让局部层有从容的规划空间 (rose A* clearance_weight 同理)。
+     */
+    double segMinEsdf(const Eigen::Vector2d &a, const Eigen::Vector2d &b) const
+    {
+        double L = (b - a).norm();
+        int n = std::max(2, (int)(L / map_->resolution()));
+        double m = std::numeric_limits<double>::max();
+        for (int i = 0; i <= n; ++i)
+            m = std::min(m, map_->getESDF(a + (b - a) * ((double)i / n)));
+        return m;
+    }
+
+    void pushAwayFromObstacles(std::vector<Eigen::Vector2d> &path)
+    {
+        const double clearance = push_clearance_;
+        const double step = map_->resolution();
+        for (size_t i = 1; i + 1 < path.size(); ++i)
+        {
+            Eigen::Vector2d orig = path[i];
+            for (int iter = 0; iter < 30; ++iter)
+            {
+                double d = map_->getESDF(path[i]);
+                if (d >= clearance)
+                    break;
+                Eigen::Vector2d gx(map_->getESDF(path[i] + Eigen::Vector2d(step, 0)) -
+                                       map_->getESDF(path[i] - Eigen::Vector2d(step, 0)),
+                                   map_->getESDF(path[i] + Eigen::Vector2d(0, step)) -
+                                       map_->getESDF(path[i] - Eigen::Vector2d(0, step)));
+                if (gx.norm() < 1e-6)
+                    break;
+                path[i] += gx.normalized() * step;
+            }
+            // 顶点推开可能让相邻段扫进另一侧障碍：段级间隙变差则回退
+            double before = std::min(segMinEsdf(path[i - 1], orig), segMinEsdf(orig, path[i + 1]));
+            double after = std::min(segMinEsdf(path[i - 1], path[i]), segMinEsdf(path[i], path[i + 1]));
+            if (after < before)
+                path[i] = orig;
+        }
+
+        double path_min = std::numeric_limits<double>::max();
+        for (size_t i = 0; i + 1 < path.size(); ++i)
+            path_min = std::min(path_min, segMinEsdf(path[i], path[i + 1]));
+        if (path_min < 0.35)
+            RCLCPP_WARN(this->get_logger(),
+                        "Global path min clearance %.2fm < 0.35m - route may be infeasible for robot",
+                        path_min);
+        else
+            RCLCPP_INFO(this->get_logger(), "Global path min clearance: %.2fm", path_min);
     }
 
     void publishWaypoints(const std::vector<Eigen::Vector2d> &path)
@@ -208,6 +266,7 @@ private:
     JPSSearcher jps_;
 
     // State
+    double push_clearance_ = 0.6;
     Eigen::Vector2d current_pos_ = Eigen::Vector2d::Zero();
     bool has_odom_ = false;
 
