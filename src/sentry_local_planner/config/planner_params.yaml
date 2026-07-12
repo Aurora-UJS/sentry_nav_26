@@ -47,10 +47,16 @@ sentry_local_planner:
       lambda_heu: 5.0
       allocate_num: 100000
       check_num: 50
-      robot_radius: 0.3            # 车体半径，footprint 碰撞检测用
+      robot_radius: 0.3            # 车体半径 (MINCO footprint 用)
       w_clearance: 20.0            # 靠近障碍软惩罚权重：有余地时选宽敞走廊 (rose clearance_weight 思想)
       clearance_dist: 0.5          # 期望间隙 (m)，esdf 低于它开始加代价
       start_ignore_radius: 0.35    # A* 起点豁免半径: 贴墙被 BRAKE 后仍能规划驶出路径，防死锁
+      # A* 验收 ESDF 阈值 = robot_radius - res/2 (抵消格心量化)。
+      # 旧 5 点二值 footprint 采样从 ≤0.2m 薄障碍带 (台沿/围栏) 的采样点间穿过，
+      # 被监控 (hard 0.15) 必否 → EXEC↔BRAKE 振荡；阈值链 0.28 > warn 0.20 > hard 0.15
+      accept_clearance: 0.28
+      max_search_time_ms: 25.0     # 搜索时间预算: 目标不可达时防全域搜索拖死 10Hz 重规划
+      near_end_min_progress: 0.4   # 搜索失败时部分路径 (NEAR_END) 的最小推进量，挡退化轨迹
 
     # --- 模式选择 ---
     planner_mode: "minco"          # "bspline" | "minco"

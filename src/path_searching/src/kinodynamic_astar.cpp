@@ -1,5 +1,7 @@
 #include <path_searching/kinodynamic_astar.hpp>
 #include <path_searching/polynomial_solver.hpp>
+#include <chrono>
+#include <limits>
 using namespace std;
 namespace fast_planner
 {
@@ -50,15 +52,21 @@ namespace fast_planner
         w_clearance_ = node_->declare_parameter<double>("search.w_clearance", 20.0);
         start_ignore_radius_ = node_->declare_parameter<double>("search.start_ignore_radius", 0.35);
         clearance_dist_ = node_->declare_parameter<double>("search.clearance_dist", 0.5);
+        accept_clearance_ = node_->declare_parameter<double>("search.accept_clearance", 0.28);
+        max_search_time_ms_ = node_->declare_parameter<double>("search.max_search_time_ms", 25.0);
+        near_end_min_progress_ = node_->declare_parameter<double>("search.near_end_min_progress", 0.4);
         tie_breaker_ = 1.0 + 1.0 / 10000;
+    }
 
-        // 预计算 footprint 采样点偏移: 中心 + 上下左右 4 个点
-        footprint_offsets_.clear();
-        footprint_offsets_.push_back(Eigen::Vector2d(0, 0));
-        footprint_offsets_.push_back(Eigen::Vector2d( robot_radius_, 0));
-        footprint_offsets_.push_back(Eigen::Vector2d(-robot_radius_, 0));
-        footprint_offsets_.push_back(Eigen::Vector2d(0,  robot_radius_));
-        footprint_offsets_.push_back(Eigen::Vector2d(0, -robot_radius_));
+    bool KinodynamicAstar::posSafe(const Eigen::Vector2d &pos)
+    {
+        // 起点豁免: 已占据的区域不算未来碰撞（与安全监控 self_ignore 同一哲学）。
+        // 贴墙/贴静态标注被 BRAKE 后，起点压障碍会让所有规划失败形成死锁
+        if ((pos - start_pos_).norm() < start_ignore_radius_)
+            return env_->isInMap(pos);
+        // ESDF 验收替代旧 5 点二值 footprint 采样: 采样点间距 0.3m 会漏检
+        // ≤0.2m 薄障碍带 (台沿/围栏)，规划器接受、监控 (ESDF hard) 必否 → 振荡
+        return env_->isInMap(pos) && env_->getDistance(pos) >= accept_clearance_;
     }
     int KinodynamicAstar::search(Eigen::Vector2d start_pt, Eigen::Vector2d start_v, Eigen::Vector2d start_a,
                                  Eigen::Vector2d end_pt, Eigen::Vector2d end_v, bool init, bool dynamic, double time_start)
@@ -69,6 +77,12 @@ namespace fast_planner
         start_vel_ = start_v;
         start_acc_ = start_a;
         start_pos_ = start_pt;
+
+        // 起点贴障诊断: 豁免圈内起步合法但值得留痕 (曾静默失败 762 次无从归因)
+        if (env_->isInMap(start_pt) && env_->getDistance(start_pt) < accept_clearance_)
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                                 "A* start esdf %.2f < accept %.2f - exempt-radius departure",
+                                 env_->getDistance(start_pt), accept_clearance_);
 
         PathNodePtr cur_node = path_node_pool_[0];
         cur_node->parent = NULL;
@@ -99,63 +113,53 @@ namespace fast_planner
         else
             expanded_nodes_.insert(cur_node->index, cur_node);
 
-        PathNodePtr terminate_node = NULL;
         bool init_search = init;
         const int tolerance = ceil(1 / resolution_);
+        const auto search_t0 = std::chrono::steady_clock::now();
+        // 打捞候选: 距目标最近的已扩展节点。搜索失败时退化返回部分路径
+        // (NEAR_END)，机器人向目标推进后下一拍从更好的位置重来
+        PathNodePtr best_node = NULL;
+        double best_dist = std::numeric_limits<double>::max();
+        bool pool_exhausted = false;
+        const char *fail_reason = "open set empty";
 
-        while (!open_set_.empty())
+        while (!open_set_.empty() && !pool_exhausted)
         {
-            cur_node = open_set_.top();
+            // 时间预算: 目标不可达时防止全域搜索拖死重规划回路
+            if (max_search_time_ms_ > 0.0 &&
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - search_t0).count() > max_search_time_ms_)
+            {
+                fail_reason = "time budget";
+                break;
+            }
 
-            // Terminate?
+            cur_node = open_set_.top();
+            open_set_.pop();
+            cur_node->node_state = IN_CLOSE_SET;
+            iter_num_ += 1;
+
             bool reach_horizon = (cur_node->state.head(2) - start_pt).norm() >= horizon_;
-            // bool near_end = (cur_node->state.head(2) - end_state.head(2)).norm() <= resolution_ * 3;
-            //                 // abs(cur_node->state.head(2) - end_index(1)) <= resolution_;
             bool near_end = abs(cur_node->index(0) - end_index(0)) <= tolerance &&
                     abs(cur_node->index(1) - end_index(1)) <= tolerance;
 
-            if (reach_horizon || near_end)
+            if (near_end)
             {
-                terminate_node = cur_node;
-                retrievePath(terminate_node);
-                if (near_end)
+                // near_end 是索引切比雪夫距离——"近"可能隔着薄障碍 (台沿死锁根因)。
+                // shot 成功才算到达；失败不终止，继续扩展绕行，后续弹出的
+                // near_end 节点 (如绕过障碍端头的) 再重试 shot
+                estimateHeuristic(cur_node->state, end_state, time_to_goal);
+                if (computeShotTraj(cur_node->state, end_state, time_to_goal))
                 {
-                    // Check whether shot traj exist
-                    estimateHeuristic(cur_node->state, end_state, time_to_goal);
-                    computeShotTraj(cur_node->state, end_state, time_to_goal);
-                    if (init_search)
-                        RCLCPP_DEBUG(node_->get_logger(), "Shot in first search loop (start near goal)");
+                    retrievePath(cur_node);
+                    return REACH_END;
                 }
             }
             if (reach_horizon)
             {
-                if (is_shot_succ_)
-                {
-                    return REACH_END;
-                }
-                else
-                {
-                    return REACH_HORIZON;
-                }
+                retrievePath(cur_node);
+                return REACH_HORIZON;
             }
-            if (near_end)
-            {
-                if (is_shot_succ_)
-                {
-                    return REACH_END;
-                }
-                else if (cur_node->parent != NULL)
-                {
-                    return NEAR_END;
-                }
-                else
-                {
-                    return NO_PATH;
-                }
-            }
-            open_set_.pop();
-            cur_node->node_state = IN_CLOSE_SET;
-            iter_num_ += 1;
 
             double res = 1 / 2.0, time_res = 1 / 1.0, time_res_init = 1 / 20.0;
             Eigen::Matrix<double, 4, 1> cur_state = cur_node->state;
@@ -194,8 +198,8 @@ namespace fast_planner
             }
 
             // cout << "cur state:" << cur_state.head(3).transpose() << endl;
-            for (int i = 0; i < inputs.size(); ++i)
-                for (int j = 0; j < durations.size(); ++j)
+            for (size_t i = 0; i < inputs.size() && !pool_exhausted; ++i)
+                for (size_t j = 0; j < durations.size() && !pool_exhausted; ++j)
                 {
                     um = inputs[i];
                     double tau = durations[j];
@@ -230,7 +234,7 @@ namespace fast_planner
                         continue;
                     }
 
-                    // Check safety
+                    // Check safety (豁免与 ESDF 验收统一在 posSafe)
                     Eigen::Vector2d pos;
                     Eigen::Matrix<double, 4, 1> xt;
                     bool is_occ = false;
@@ -239,30 +243,7 @@ namespace fast_planner
                         double dt = tau * double(k) / double(check_num_);
                         stateTransit(cur_state, xt, um, dt);
                         pos = xt.head(2);
-                        // 起点豁免: 已占据的区域不算未来碰撞（与安全监控 self_ignore
-                        // 同一哲学）。贴墙/贴静态标注被 BRAKE 后，起点 footprint 压在
-                        // 障碍上会让所有规划失败形成死锁；豁免半径内只查中心点出图。
-                        if ((pos - start_pos_).norm() < start_ignore_radius_)
-                        {
-                            if (!env_->isInMap(pos))
-                            {
-                                is_occ = true;
-                                break;
-                            }
-                            continue;
-                        }
-                        bool fp_occ = false;
-                        for (const auto &offset : footprint_offsets_)
-                        {
-                            Eigen::Vector2d fp = pos + offset;
-                            if (env_->getInflateOccupancy(fp) == 1 ||
-                                !env_->isInMap(fp))
-                            {
-                                fp_occ = true;
-                                break;
-                            }
-                        }
-                        if (fp_occ)
+                        if (!posSafe(pos))
                         {
                             is_occ = true;
                             break;
@@ -330,6 +311,15 @@ namespace fast_planner
                             }
                             open_set_.push(pro_node);
 
+                            // 打捞候选在创建时更新: 预算在首次扩展即耗尽时
+                            // (init 一次生成数百 primitive)，弹出时更新会一无所获
+                            double d_goal = (pro_state.head(2) - end_state.head(2)).norm();
+                            if (d_goal < best_dist)
+                            {
+                                best_dist = d_goal;
+                                best_node = pro_node;
+                            }
+
                             if (dynamic)
                                 expanded_nodes_.insert(pro_id, pro_node->time, pro_node);
                             else
@@ -340,8 +330,10 @@ namespace fast_planner
                             use_node_num_ += 1;
                             if (use_node_num_ == allocate_num_)
                             {
-                                RCLCPP_WARN(node_->get_logger(), "A* run out of memory");
-                                return NO_PATH;
+                                // 不直接 return: 走统一收尾，打捞 best 节点部分路径
+                                pool_exhausted = true;
+                                fail_reason = "node pool exhausted";
+                                break;
                             }
                         }
                         else if (pro_node->node_state == IN_OPEN_SET)
@@ -367,8 +359,29 @@ namespace fast_planner
                 }
             // init_search = false;
         }
-        RCLCPP_WARN(node_->get_logger(), "A* open set empty, no path! nodes=%d, iters=%d",
-                    use_node_num_, iter_num_);
+
+        // 统一收尾: 到不了目标但有足够推进量 → 返回部分路径 (NEAR_END)，
+        // 机器人先向目标挪，下一拍从更好的位置重规划；否则有声 NO_PATH——
+        // 静默失败出口曾让 762 次规划失败无从归因 (台沿死锁取证)
+        if (best_node != NULL &&
+            (best_node->state.head(2) - start_pt).norm() >= near_end_min_progress_)
+        {
+            retrievePath(best_node);
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                                 "A* partial path (%s): best node %.2fm from goal, nodes=%d iters=%d",
+                                 fail_reason, best_dist, use_node_num_, iter_num_);
+            return NEAR_END;
+        }
+        double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - search_t0).count();
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,
+                             "A* no path (%s): start(%.2f,%.2f) esdf %.2f -> goal(%.2f,%.2f) esdf %.2f, "
+                             "nodes=%d iters=%d %.1fms",
+                             fail_reason, start_pt(0), start_pt(1),
+                             env_->isInMap(start_pt) ? env_->getDistance(start_pt) : -1.0,
+                             end_pt(0), end_pt(1),
+                             env_->isInMap(end_pt) ? env_->getDistance(end_pt) : -1.0,
+                             use_node_num_, iter_num_, elapsed_ms);
         return NO_PATH;
     }
 
@@ -463,16 +476,10 @@ namespace fast_planner
                 return false;
             }
 
-            // if (edt_environment_->evaluateCoarseEDT(coord, -1.0) <= margin_) {
-            //   return false;
-            // }
-            for (const auto &offset : footprint_offsets_)
-            {
-                Eigen::Vector2d fp = coord + offset;
-                if (env_->getInflateOccupancy(fp) == 1 ||
-                    !env_->isInMap(fp))
-                    return false;
-            }
+            // ESDF 验收 + 起点豁免 (与扩展检查同一判据)。豁免必不可少:
+            // 贴墙起步的近距 shot 前几个采样必然低于验收阈值
+            if (!posSafe(coord))
+                return false;
         }
         coef_shot_ = coef;
         t_shot_ = t_d;
@@ -553,6 +560,8 @@ namespace fast_planner
     std::vector<Eigen::Vector2d> KinodynamicAstar::getKinoTraj(double delta_t)
     {
         vector<Eigen::Vector2d> state_list;
+        if (path_nodes_.empty())
+            return state_list;  // NO_PATH 后调用的防护
         RCLCPP_DEBUG(node_->get_logger(), "getKinoTraj: path_nodes=%zu", path_nodes_.size());
         /* ---------- get traj of searching ---------- */
         PathNodePtr node = path_nodes_.back();
@@ -597,6 +606,8 @@ namespace fast_planner
     void KinodynamicAstar::getSamples(double &ts, vector<Eigen::Vector2d> &point_set,
                                       vector<Eigen::Vector2d> &start_end_derivatives)
     {
+        if (path_nodes_.empty())
+            return;  // NO_PATH 后调用的防护
         /* ---------- path duration ---------- */
         double T_sum = 0.0;
         if (is_shot_succ_)
@@ -625,7 +636,9 @@ namespace fast_planner
         else
         {
             t = path_nodes_.back()->duration;
-            end_vel = node->state.tail(2);
+            // 末速取路径末节点 (node 此刻已沿 parent 走到根 = 起点——
+            // 旧代码把起点速度当末速喂给 MINCO，NEAR_END 常态化后必须修)
+            end_vel = path_nodes_.back()->state.tail(2);
             end_acc = path_nodes_.back()->input;
         }
 

@@ -131,6 +131,8 @@ namespace fast_planner
             NEAR_END = 4
         };
 
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
     private:
         std::shared_ptr<rclcpp::Node> node_;
         
@@ -151,8 +153,13 @@ namespace fast_planner
         double w_clearance_ = 20.0;    // 靠近障碍软惩罚权重
         double clearance_dist_ = 0.5;  // 期望间隙 (m)，esdf 低于它开始加代价
         double start_ignore_radius_ = 0.35;  // 起点豁免半径: 贴墙起步不算碰撞
+        // 验收 ESDF 阈值 = robot_radius - res/2 (抵消格心量化)。
+        // 旧 5 点二值 footprint 采样会从 ≤0.2m 薄障碍带的采样点间穿过
+        // (实测车体压墙 0.21m 而 5 点全空)，被安全监控 (ESDF) 必否 → 振荡
+        double accept_clearance_ = 0.28;
+        double max_search_time_ms_ = 15.0;    // 搜索时间预算; <=0 关闭
+        double near_end_min_progress_ = 0.4;  // NEAR_END 部分路径最小推进量
         Eigen::Vector2d start_pos_ = Eigen::Vector2d::Zero();
-        std::vector<Eigen::Vector2d> footprint_offsets_;
         bool has_path_ = false;
 
         Eigen::Vector2d start_vel_, end_vel_, start_acc_;
@@ -167,6 +174,9 @@ namespace fast_planner
 
         double estimateHeuristic(Eigen::VectorXd x1, Eigen::VectorXd x2, double &optimal_time);
 
+        /** 单点安全判定: 起点豁免圈内只查出图; 圈外要求活图 ESDF >= accept_clearance_ */
+        bool posSafe(const Eigen::Vector2d &pos);
+
         bool computeShotTraj(Eigen::VectorXd state1, Eigen::VectorXd state2, double time_to_goal);
         Eigen::Vector2i posToIndex(Eigen::Vector2d pt);
 
@@ -174,8 +184,6 @@ namespace fast_planner
         void stateTransit(Eigen::Matrix<double, 4, 1> &state0, Eigen::Matrix<double, 4, 1> &state1,
                           Eigen::Vector2d um, double tau);
         int timeToIndex(double time);
-
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     };
 } // namespace fast_planner
 
