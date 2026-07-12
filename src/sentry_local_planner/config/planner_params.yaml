@@ -39,7 +39,7 @@ sentry_local_planner:
       max_tau: 0.6
       init_max_tau: 0.8
       max_vel: 3.0                 # 哨兵最大速度 3 m/s
-      max_acc: 3.0                 # 麦轮加速度
+      max_acc: 2.0                 # 麦轮加速度 (3.0 在 3 rad/s 自转下实测侧翻，降到 2.0 保护底盘)
       w_time: 5.0
       horizon: 15.0                # 搜索范围 15m (赛场对角线)
       resolution_astar: 0.05      # 与 sdf_map 分辨率一致
