@@ -53,7 +53,7 @@ namespace fast_planner
         start_ignore_radius_ = node_->declare_parameter<double>("search.start_ignore_radius", 0.35);
         clearance_dist_ = node_->declare_parameter<double>("search.clearance_dist", 0.5);
         accept_clearance_ = node_->declare_parameter<double>("search.accept_clearance", 0.28);
-        max_search_time_ms_ = node_->declare_parameter<double>("search.max_search_time_ms", 25.0);
+        max_search_time_ms_ = node_->declare_parameter<double>("search.max_search_time_ms", 40.0);
         near_end_min_progress_ = node_->declare_parameter<double>("search.near_end_min_progress", 0.4);
         tie_breaker_ = 1.0 + 1.0 / 10000;
     }
@@ -312,9 +312,12 @@ namespace fast_planner
                             open_set_.push(pro_node);
 
                             // 打捞候选在创建时更新: 预算在首次扩展即耗尽时
-                            // (init 一次生成数百 primitive)，弹出时更新会一无所获
+                            // (init 一次生成数百 primitive)，弹出时更新会一无所获。
+                            // 先过最小推进量再取距目标最近——否则朝目标的微小步
+                            // (贴障时唯一能靠近的) 总是胜出又过不了推进门槛
                             double d_goal = (pro_state.head(2) - end_state.head(2)).norm();
-                            if (d_goal < best_dist)
+                            if (d_goal < best_dist &&
+                                (pro_state.head(2) - start_pt).norm() >= near_end_min_progress_)
                             {
                                 best_dist = d_goal;
                                 best_node = pro_node;
@@ -363,8 +366,7 @@ namespace fast_planner
         // 统一收尾: 到不了目标但有足够推进量 → 返回部分路径 (NEAR_END)，
         // 机器人先向目标挪，下一拍从更好的位置重规划；否则有声 NO_PATH——
         // 静默失败出口曾让 762 次规划失败无从归因 (台沿死锁取证)
-        if (best_node != NULL &&
-            (best_node->state.head(2) - start_pt).norm() >= near_end_min_progress_)
+        if (best_node != NULL)
         {
             retrievePath(best_node);
             RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 1000,

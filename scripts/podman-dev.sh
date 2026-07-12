@@ -133,7 +133,9 @@ case "${command}" in
         run_container bash -lc 'rosdep update --rosdistro "${ROS_DISTRO:-jazzy}" || true; sudo apt-get update; rosdep install --from-paths src --ignore-src -r -y --rosdistro "${ROS_DISTRO:-jazzy}"'
         ;;
     build)
-        run_container colcon build --symlink-install
+        # RelWithDebInfo: 默认 colcon 构建不带任何 -O 标志 (-O0)，A* 单次
+        # init 扩展实测 35-56ms、ESDF/MINCO 全线拖慢 10-30x
+        run_container colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
         ;;
     test)
         run_container colcon test --event-handlers console_direct+

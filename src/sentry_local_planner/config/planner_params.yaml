@@ -55,7 +55,7 @@ sentry_local_planner:
       # 旧 5 点二值 footprint 采样从 ≤0.2m 薄障碍带 (台沿/围栏) 的采样点间穿过，
       # 被监控 (hard 0.15) 必否 → EXEC↔BRAKE 振荡；阈值链 0.28 > warn 0.20 > hard 0.15
       accept_clearance: 0.28
-      max_search_time_ms: 25.0     # 搜索时间预算: 目标不可达时防全域搜索拖死 10Hz 重规划
+      max_search_time_ms: 40.0     # 搜索时间预算: 目标不可达时防全域搜索拖死 10Hz 重规划
       near_end_min_progress: 0.4   # 搜索失败时部分路径 (NEAR_END) 的最小推进量，挡退化轨迹
 
     # --- 模式选择 ---
