@@ -17,6 +17,7 @@ void MapCore::initBuffers(const MappingParameters &mp, int buffer_size)
     md_.elevation_buffer_ = vector<float>(buffer_size, std::numeric_limits<float>::quiet_NaN());
     md_.slope_obstacle_buffer_ = vector<char>(buffer_size, 0);
     md_.logodds_buffer_ = vector<float>(buffer_size, 0.0f);
+    md_.last_hit_time_ = vector<float>(buffer_size, MappingData::kNeverHit);
 
     md_.local_bound_min_ = Eigen::Vector2i::Zero();
     md_.local_bound_max_ = Eigen::Vector2i::Zero();
@@ -175,6 +176,7 @@ void MapCore::clearRingSlice(int dim, int from, int to)
         md_.elevation_buffer_[addr] = std::numeric_limits<float>::quiet_NaN();
         md_.slope_obstacle_buffer_[addr] = 0;
         md_.logodds_buffer_[addr] = 0.0f;
+        md_.last_hit_time_[addr] = MappingData::kNeverHit;
     };
 
     if (dim == 0) {
@@ -263,14 +265,20 @@ void MapCore::raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end)
     }
 }
 
-void MapCore::thresholdLogodds()
+void MapCore::thresholdLogodds(double now)
 {
+    // 占据 = logodds 超阈值 且 最近被命中过 (occ_timeout_ <= 0 时关闭龄期门控)。
+    // 只影响局部更新窗口内的格子；窗口外维持原状，远处未复测的真实墙体不会凭空过期。
+    const bool use_timeout = mp_.occ_timeout_ > 0.0;
     for (int x = md_.local_bound_min_(0); x <= md_.local_bound_max_(0); ++x)
         for (int y = md_.local_bound_min_(1); y <= md_.local_bound_max_(1); ++y)
         {
             int addr = toAddress(x, y);
-            md_.occupancy_buffer_inflate_[addr] =
-                (md_.logodds_buffer_[addr] > (float)mp_.logodds_thresh_) ? 1 : 0;
+            bool occ = md_.logodds_buffer_[addr] > (float)mp_.logodds_thresh_;
+            if (occ && use_timeout &&
+                now - (double)md_.last_hit_time_[addr] > mp_.occ_timeout_)
+                occ = false;
+            md_.occupancy_buffer_inflate_[addr] = occ ? 1 : 0;
         }
 }
 

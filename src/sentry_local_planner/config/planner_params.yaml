@@ -27,6 +27,7 @@ sentry_local_planner:
       logodds_max: 3.5               # 上限 clamp (~97% 占据)
       logodds_min: -2.0              # 下限 clamp (~12% 占据)
       logodds_thresh: 0.0            # 占据阈值: > 此值 → occupied
+      occ_timeout: 3.5               # 占据超时 (s): 超时未再命中的格子视为空闲，清自转幽灵障碍；<=0 关闭
 
     # --- Kinodynamic A* 参数 ---
     search:

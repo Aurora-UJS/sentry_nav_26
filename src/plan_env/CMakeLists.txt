@@ -28,6 +28,15 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_occ_timeout
+    test/test_occ_timeout.cpp
+    src/map_core.cpp
+  )
+  target_include_directories(test_occ_timeout PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
 endif()
 
 ament_auto_package(

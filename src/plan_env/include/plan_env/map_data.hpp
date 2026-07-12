@@ -44,6 +44,11 @@ struct MappingParameters
   double logodds_max_, logodds_min_;
   double logodds_thresh_;
 
+  // 占据超时 (s)：超过此时长未被命中的格子视为空闲，<=0 关闭。
+  // 自转下点云 yaw 抖动会把命中涂抹到邻格形成幽灵障碍，raycast 只能清除
+  // 恰好被后续射线穿过的格子；超时兜底让未再命中的幽灵自动过期。
+  double occ_timeout_ = 0.0;
+
   std::string frame_id_;
 };
 
@@ -67,6 +72,10 @@ struct MappingData
 
   // Log-odds 累积值，0 = 未知
   std::vector<float> logodds_buffer_;
+
+  // 每格最近一次命中时刻 (s)，未命中过 = kNeverHit；配合 occ_timeout_ 使用
+  static constexpr float kNeverHit = -1e9f;
+  std::vector<float> last_hit_time_;
 
   std::vector<double> tmp_buffer1_;
   Eigen::Vector2i local_bound_min_, local_bound_max_;

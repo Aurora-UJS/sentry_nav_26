@@ -75,6 +75,7 @@ void SDFMap::initMap(std::shared_ptr<rclcpp::Node> nh)
 	mp.logodds_max_ = node_->declare_parameter<double>("sdf_map.logodds_max", 3.5);
 	mp.logodds_min_ = node_->declare_parameter<double>("sdf_map.logodds_min", -2.0);
 	mp.logodds_thresh_ = node_->declare_parameter<double>("sdf_map.logodds_thresh", 0.0);
+	mp.occ_timeout_ = node_->declare_parameter<double>("sdf_map.occ_timeout", 0.0);
 
 	RCLCPP_INFO(node_->get_logger(),
 		"Inflation: %.3fm (inf_step=%d), local_range=(%.1f,%.1f)",
@@ -255,7 +256,8 @@ void SDFMap::laserCallback(const sensor_msgs::msg::LaserScan::ConstSharedPtr &la
 	if (isnan(core_.md_.laser_pos_(0)) || isnan(core_.md_.laser_pos_(1)))
 		return;
 
-	sensor_proc_.processLaser(latest_laser, core_.md_.laser_pos_);
+	sensor_proc_.processLaser(latest_laser, core_.md_.laser_pos_,
+							  rclcpp::Time(laser_msg->header.stamp).seconds());
 }
 
 void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg)
@@ -276,7 +278,8 @@ void SDFMap::cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &
 		"cloudCallback: %zu pts, robot at (%.2f, %.2f)",
 		cloud_3d.points.size(), core_.md_.laser_pos_(0), core_.md_.laser_pos_(1));
 
-	sensor_proc_.processCloud(cloud_3d, core_.md_.laser_pos_, core_.md_.laser_z_);
+	sensor_proc_.processCloud(cloud_3d, core_.md_.laser_pos_, core_.md_.laser_z_,
+							  rclcpp::Time(cloud_msg->header.stamp).seconds());
 }
 
 void SDFMap::updateESDFCallback()

@@ -4,7 +4,7 @@
 #include <limits>
 
 void SensorProcessor::processCloud(const pcl::PointCloud<pcl::PointXYZ> &cloud_3d,
-                                   const Eigen::Vector2d &robot_pos, double robot_z)
+                                   const Eigen::Vector2d &robot_pos, double robot_z, double now_sec)
 {
     if (!core_) return;
     auto &md = core_->md_;
@@ -154,6 +154,7 @@ void SensorProcessor::processCloud(const pcl::PointCloud<pcl::PointXYZ> &cloud_3
                     md.logodds_buffer_[inf_addr] += (float)mp.logodds_hit_;
                     if (md.logodds_buffer_[inf_addr] > (float)mp.logodds_max_)
                         md.logodds_buffer_[inf_addr] = (float)mp.logodds_max_;
+                    md.last_hit_time_[inf_addr] = (float)now_sec;
                 }
             }
         }
@@ -168,14 +169,14 @@ void SensorProcessor::processCloud(const pcl::PointCloud<pcl::PointXYZ> &cloud_3
     core_->boundIndex(md.local_bound_min_);
     core_->boundIndex(md.local_bound_max_);
 
-    core_->thresholdLogodds();
+    core_->thresholdLogodds(now_sec);
 
     md.esdf_need_update_ = true;
     md.update_num_ += 1;
 }
 
 void SensorProcessor::processLaser(const pcl::PointCloud<pcl::PointXY> &laser,
-                                   const Eigen::Vector2d &robot_pos)
+                                   const Eigen::Vector2d &robot_pos, double now_sec)
 {
     if (!core_) return;
     auto &md = core_->md_;
@@ -225,6 +226,7 @@ void SensorProcessor::processLaser(const pcl::PointCloud<pcl::PointXY> &laser,
                     md.logodds_buffer_[idx_inf] += (float)mp.logodds_hit_;
                     if (md.logodds_buffer_[idx_inf] > (float)mp.logodds_max_)
                         md.logodds_buffer_[idx_inf] = (float)mp.logodds_max_;
+                    md.last_hit_time_[idx_inf] = (float)now_sec;
                 }
         }
     }
@@ -235,7 +237,7 @@ void SensorProcessor::processLaser(const pcl::PointCloud<pcl::PointXY> &laser,
     core_->boundIndex(md.local_bound_min_);
     core_->boundIndex(md.local_bound_max_);
 
-    core_->thresholdLogodds();
+    core_->thresholdLogodds(now_sec);
 
     md.esdf_need_update_ = true;
     md.update_num_ += 1;

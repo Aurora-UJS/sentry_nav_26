@@ -39,7 +39,8 @@ public:
     void slideMapTo(const Eigen::Vector2d &new_center);
     void clearRingSlice(int dim, int from, int to);
     void raycast(const Eigen::Vector2i &start, const Eigen::Vector2i &end);
-    void thresholdLogodds();
+    // now: 当前传感器时刻 (s)，用于 occ_timeout_ 龄期门控
+    void thresholdLogodds(double now);
 
     // ==================== ESDF ====================
     void updateESDF2d();
