@@ -352,6 +352,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 | Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot |
 | MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS |
 | MPC 跟踪 | ✅ | LDLT，软约束 |
+| 执行中轨迹安全监控 | ✅ | 50Hz 前瞻检查 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯（gtest + RMUC 仿真验证）|
 | RMUC 仿真 | ✅ | submodule 提供 |
 | 真车适配 | 🟡 | 需替换 LIO 输入话题 + map→odom 全局定位 |
 
@@ -364,7 +365,7 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 ### 短期（修 bug + 接缝）
 
 - 在线建图模式接入全局规划器（完成 `OnlineMapProxy`）
-- 局部规划器 trajectory swap 原子化（修 race）
+- ~~局部规划器 trajectory swap 原子化（修 race）~~ ✅ 已完成（`TrajSnapshot` 只读快照交换）
 - 点云分支补 raycast clearing，避免动障永久残留
 - 高度过滤参数从 yaml 实际生效（透传到 `SensorProcessor`）
 
