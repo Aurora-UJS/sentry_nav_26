@@ -1,0 +1,9 @@
+sentry_serial:
+  ros__parameters:
+    port: /dev/ttyACM0        # C 板 USB CDC 常见为 ttyACM0；UART 转接则 ttyUSB0
+    baud: 921600              # 支持 115200 / 230400 / 460800 / 921600
+    reconnect_period: 1.0     # 打开失败/断线后的重试间隔 (s)
+    cmd_world_topic: /cmd_vel_world
+    odom_topic: /Odometry
+    feedback_topic: /chassis/feedback
+    referee_topic: /referee/state
