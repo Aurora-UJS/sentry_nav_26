@@ -85,6 +85,12 @@ public:
     bool isDirectionAllowed(const Eigen::Vector2d &world_pos,
                             const Eigen::Vector2d &travel_dir) const;
 
+    // 到最近 ONEWAY 区域边界的距离 (米, chamfer 近似)。
+    // 未启用 / 无 ONEWAY 区域 / 越界 → +inf。
+    // 供全局 JPS 做立面软净空: oneway 区 = 只能下不能上的台阶, 其边界即 90° 立面,
+    // 全局路径应保持净空而不是贴脸走 (坡脚卡死根因)。
+    double getOnewayDistance(const Eigen::Vector2d &world_pos) const;
+
     // 栅格元信息 (可视化 / 调试)
     double resolution() const { return resolution_; }
     Eigen::Vector2d origin() const { return origin_; }
@@ -96,6 +102,7 @@ private:
     bool worldToGrid(const Eigen::Vector2d &p, int &gx, int &gy) const;
     static bool pointInPolygon(const Eigen::Vector2d &p, const std::vector<Eigen::Vector2d> &poly);
     void rasterize();
+    void computeOnewayDistance();
 
     bool enabled_ = false;
     double resolution_ = 0.05;
@@ -106,6 +113,7 @@ private:
 
     std::vector<Region> regions_;
     std::vector<TravCell> grid_;        // width_*height_, 行主序: idx = gx*height_ + gy (与 PriorMap 一致)
+    std::vector<int> oneway_dist_;      // 到最近 ONEWAY 格的 chamfer 距离 (格数); 空 = 无 ONEWAY
     TravCell free_sentinel_;            // 越界返回引用用
 };
 

@@ -81,9 +81,18 @@ public:
 
                 double step = std::hypot(nx - cx, ny - cy) * map_->resolution();
                 double esdf_val = map_->getESDF(nx, ny);
+                // ONEWAY 区立面软净空: 距 oneway 区(90° 立面)越近, 等效 ESDF 越低,
+                // 与静态 ESDF 共用同一条代价曲线 → 全局路径主动离开立面而不是贴脸走。
+                // 坡脚卡死根因链: 全局路径贴立面 → 局部 A* 只能贴墙绕(0.15~0.27m) →
+                // 自转幽灵闪烁 → 安全监控抖动。软代价不硬挡: 目标在区内/必须穿过仍可走。
+                if (trav_ && trav_->enabled())
+                {
+                    double d_ow = trav_->getOnewayDistance(map_->gridToWorld(nx, ny));
+                    esdf_val = std::min(esdf_val, d_ow);
+                }
                 double cost_mult = 1.0;
-                if (esdf_val < safety_dist_ * 3.0 && esdf_val > 0)
-                    cost_mult += esdf_weight_ / (esdf_val + 0.1);
+                if (esdf_val < safety_dist_ * 3.0)
+                    cost_mult += esdf_weight_ / (std::max(esdf_val, 0.05) + 0.1);
 
                 // 可通行性标注层 ONEWAY 软门控: cur→successor 这一段若逆着单向箭头
                 // 穿过 oneway 区, 则放大代价 (软约束, 绝不硬跳过, 以保持 JPS 完整/连通;

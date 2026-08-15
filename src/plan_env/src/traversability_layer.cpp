@@ -121,7 +121,7 @@ bool TraversabilityLayer::loadFromYaml(const std::string &yaml_path)
                     lo = lo.cwiseMin(p);
                     hi = hi.cwiseMax(p);
                 }
-            const double margin = 0.5;  // m
+            const double margin = 1.0;  // m (覆盖 JPS 立面软净空带 ~0.9m)
             origin_ = lo - Eigen::Vector2d(margin, margin);
             Eigen::Vector2d span = (hi - lo) + Eigen::Vector2d(2 * margin, 2 * margin);
             width_ = std::max(1, (int)std::ceil(span(0) * resolution_inv_));
@@ -130,6 +130,7 @@ bool TraversabilityLayer::loadFromYaml(const std::string &yaml_path)
     }
 
     rasterize();
+    computeOnewayDistance();
     enabled_ = true;
     std::cerr << "[TraversabilityLayer] loaded " << regions_.size() << " regions, grid "
               << width_ << "x" << height_ << " @ " << resolution_ << "m, origin ("
@@ -244,6 +245,62 @@ bool TraversabilityLayer::isDirectionAllowed(const Eigen::Vector2d &world_pos,
     }
     }
     return true;
+}
+
+void TraversabilityLayer::computeOnewayDistance()
+{
+    const int INF = 0x0FFFFFFF;
+    oneway_dist_.assign((size_t)width_ * height_, INF);
+    auto at = [&](int gx, int gy) -> int & { return oneway_dist_[(size_t)gx * height_ + gy]; };
+
+    bool has_oneway = false;
+    for (int gx = 0; gx < width_; ++gx)
+        for (int gy = 0; gy < height_; ++gy)
+            if (grid_[(size_t)gx * height_ + gy].type == TravType::ONEWAY)
+            {
+                at(gx, gy) = 0;
+                has_oneway = true;
+            }
+    if (!has_oneway)
+    {
+        oneway_dist_.clear();  // 无 ONEWAY 区域: 查询恒返回 inf (零行为变化)
+        return;
+    }
+
+    // 两遍 chamfer 3-4 距离变换 (与 plan_env EDT 同族, 网格小, 开销可忽略)
+    for (int gy = 0; gy < height_; ++gy)
+        for (int gx = 0; gx < width_; ++gx)
+        {
+            int v = at(gx, gy);
+            if (gx > 0) v = std::min(v, at(gx - 1, gy) + 3);
+            if (gy > 0) v = std::min(v, at(gx, gy - 1) + 3);
+            if (gx > 0 && gy > 0) v = std::min(v, at(gx - 1, gy - 1) + 4);
+            if (gx < width_ - 1 && gy > 0) v = std::min(v, at(gx + 1, gy - 1) + 4);
+            at(gx, gy) = v;
+        }
+    for (int gy = height_ - 1; gy >= 0; --gy)
+        for (int gx = width_ - 1; gx >= 0; --gx)
+        {
+            int v = at(gx, gy);
+            if (gx < width_ - 1) v = std::min(v, at(gx + 1, gy) + 3);
+            if (gy < height_ - 1) v = std::min(v, at(gx, gy + 1) + 3);
+            if (gx < width_ - 1 && gy < height_ - 1) v = std::min(v, at(gx + 1, gy + 1) + 4);
+            if (gx > 0 && gy < height_ - 1) v = std::min(v, at(gx - 1, gy + 1) + 4);
+            at(gx, gy) = v;
+        }
+}
+
+double TraversabilityLayer::getOnewayDistance(const Eigen::Vector2d &world_pos) const
+{
+    if (!enabled_ || oneway_dist_.empty())
+        return std::numeric_limits<double>::infinity();
+    int gx, gy;
+    if (!worldToGrid(world_pos, gx, gy))
+        return std::numeric_limits<double>::infinity();
+    int d = oneway_dist_[(size_t)gx * height_ + gy];
+    if (d >= 0x0FFFFFFF)
+        return std::numeric_limits<double>::infinity();
+    return (double)d * resolution_;
 }
 
 }  // namespace sentry_nav
