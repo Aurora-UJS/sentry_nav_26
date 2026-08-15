@@ -20,6 +20,11 @@ namespace fast_planner
         double resolution_inv_;
         double distToBox(int idx, const Eigen::Vector2d &pos, const double &time);
         double minDistToAllBox(const Eigen::Vector2d &pos, const double &time);
+        // distToBox / minDistToAllBox 的带解析梯度版本 (供 evaluateCoarseEDTWithGrad)
+        double distToBoxGrad(int idx, const Eigen::Vector2d &pos, const double &time,
+                             Eigen::Vector2d &grad);
+        double minDistToAllBoxWithGrad(const Eigen::Vector2d &pos, const double &time,
+                                       Eigen::Vector2d &grad);
 
     public:
         EDTEnvironment(/* args */)
@@ -55,6 +60,8 @@ namespace fast_planner
         void evaluateEDTBiquadratic(const Eigen::Vector2d &pos, double &dist,
                                     Eigen::Vector2d &grad);
         double evaluateCoarseEDT(Eigen::Vector2d &pos, double time);
+        void evaluateCoarseEDTWithGrad(const Eigen::Vector2d &pos, double time,
+                                       double &dist, Eigen::Vector2d &grad) override;
         bool hasDynamicObjects() const override
         {
             return obj_prediction_ != nullptr && !obj_prediction_->empty();

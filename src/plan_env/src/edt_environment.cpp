@@ -52,6 +52,48 @@ namespace fast_planner
         return dist;
     }
 
+    double EDTEnvironment::distToBoxGrad(int idx, const Eigen::Vector2d &pos,
+                                         const double &time, Eigen::Vector2d &grad)
+    {
+        Eigen::Vector2d pos_box = obj_prediction_->at(idx).evaluateConstVel(time);
+        Eigen::Vector2d box_max = pos_box + 0.5 * obj_scale_->at(idx);
+        Eigen::Vector2d box_min = pos_box - 0.5 * obj_scale_->at(idx);
+
+        // 带符号位移：该轴在盒内为 0，盒外指向最近面（负=下边界外，正=上边界外）。
+        // dist = ||d|| 是到盒的欧氏距离；解析梯度 = d/||d||（单位向量，背离盒面）。
+        Eigen::Vector2d d;
+        for (int i = 0; i < 2; i++)
+        {
+            if (pos(i) < box_min(i))       d(i) = pos(i) - box_min(i);
+            else if (pos(i) > box_max(i))  d(i) = pos(i) - box_max(i);
+            else                           d(i) = 0.0;
+        }
+        double dist = d.norm();
+        if (dist > 1e-12)
+            grad = d / dist;   // 单位向量，背离盒面
+        else
+            grad.setZero();    // 盒内/贴面：无梯度方向，置零（与中心差分一致）
+        return dist;
+    }
+
+    double EDTEnvironment::minDistToAllBoxWithGrad(const Eigen::Vector2d &pos,
+                                                   const double &time, Eigen::Vector2d &grad)
+    {
+        double best = std::numeric_limits<double>::max();
+        grad.setZero();
+        for (int i = 0; i < obj_prediction_->size(); i++)
+        {
+            Eigen::Vector2d g;
+            double di = distToBoxGrad(i, pos, time, g);
+            if (di < best)
+            {
+                best = di;
+                grad = g;
+            }
+        }
+        return best;
+    }
+
     void EDTEnvironment::getSurroundDistance(Eigen::Vector2d pts[2][2], double dists[2][2])
     {
         for (int x = 0; x < 2; x++)
@@ -152,6 +194,25 @@ namespace fast_planner
     {
         Eigen::Vector2d pos_copy = pos;
         return evaluateCoarseEDT(pos_copy, time);
+    }
+
+    void EDTEnvironment::evaluateCoarseEDTWithGrad(const Eigen::Vector2d &pos, double time,
+                                                   double &dist, Eigen::Vector2d &grad)
+    {
+        // 静态 ESDF 用双二次插值 + 解析梯度（与 evaluateEDTWithGrad / 静态分支一致）。
+        // 原动态分支用 sdf_map_->getDistance(最近格心，无梯度) + 中心差分，梯度几乎恒 0、
+        // 只在格边界跳变；这里换成双二次解析梯度，动态障碍盒部分也用解析梯度。
+        evaluateEDTBiquadratic(pos, dist, grad);
+        if (time >= 0.0 && hasDynamicObjects())
+        {
+            Eigen::Vector2d dgrad;
+            double d2 = minDistToAllBoxWithGrad(pos, time, dgrad);
+            if (d2 < dist)
+            {
+                dist = d2;
+                grad = dgrad;
+            }
+        }
     }
 
     // EDTEnvironment::

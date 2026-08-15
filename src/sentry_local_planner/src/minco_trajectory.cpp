@@ -384,14 +384,9 @@ double MincoTrajectory::calcCollisionCost(std::vector<double> &grad_x)
                 if (traj_start_time_ >= 0.0 && edt_env_->hasDynamicObjects())
                 {
                     double t_abs = traj_start_time_ + t_elapsed + tau;
-                    dist = edt_env_->evaluateCoarseEDT(fp, t_abs);
-                    const double fd_eps = 0.01;
-                    Eigen::Vector2d px(fp(0)+fd_eps, fp(1)), mx(fp(0)-fd_eps, fp(1));
-                    Eigen::Vector2d py(fp(0), fp(1)+fd_eps), my(fp(0), fp(1)-fd_eps);
-                    esdf_grad(0) = (edt_env_->evaluateCoarseEDT(px, t_abs) -
-                                    edt_env_->evaluateCoarseEDT(mx, t_abs)) / (2.0*fd_eps);
-                    esdf_grad(1) = (edt_env_->evaluateCoarseEDT(py, t_abs) -
-                                    edt_env_->evaluateCoarseEDT(my, t_abs)) / (2.0*fd_eps);
+                    // 解析梯度：静态 ESDF(双二次) + 动态预测盒，替代原 4 次
+                    // evaluateCoarseEDT 中心差分（最近格心距离的差分梯度几乎恒 0）。
+                    edt_env_->evaluateCoarseEDTWithGrad(fp, t_abs, dist, esdf_grad);
                 }
                 else
                 {

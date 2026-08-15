@@ -24,6 +24,13 @@ public:
     virtual void evaluateEDTWithGrad(const Eigen::Vector2d &pos, double time,
                                      double &dist, Eigen::Vector2d &grad) = 0;
     virtual double evaluateCoarseEDT(const Eigen::Vector2d &pos, double time) = 0;
+    // 距离 + 解析梯度（静态 ESDF 与动态粗障碍取 min）。默认实现走 evaluateEDTWithGrad，
+    // 适用于无动态障碍的环境（测试 mock）；有动障的派生类（EDTEnvironment）覆盖为解析实现。
+    virtual void evaluateCoarseEDTWithGrad(const Eigen::Vector2d &pos, double time,
+                                           double &dist, Eigen::Vector2d &grad)
+    {
+        evaluateEDTWithGrad(pos, time, dist, grad);
+    }
     virtual bool hasDynamicObjects() const = 0;
 
     // 地图信息
