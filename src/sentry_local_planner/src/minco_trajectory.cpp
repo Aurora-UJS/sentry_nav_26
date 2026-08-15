@@ -248,13 +248,14 @@ void MincoTrajectory::rebuildFromWaypoints(const std::vector<Eigen::Vector2d> &w
 
 Eigen::Vector3d MincoTrajectory::solveBackpropCoeffs(double T)
 {
-    double T2 = T*T, T3 = T2*T, T4 = T3*T, T5 = T4*T;
-    Eigen::Matrix3d A;
-    A << T3,   T4,    T5,
-         3*T2, 4*T3,  5*T4,
-         6*T,  12*T2, 20*T3;
-    Eigen::Vector3d e1(1.0, 0.0, 0.0);
-    return A.colPivHouseholderQr().solve(e1);
+    // 闭式解 A^{-1}·e1，其中 A = [T³ T⁴ T⁵; 3T² 4T³ 5T⁴; 6T 12T² 20T³]，det(A)=2T⁹。
+    // 结果 = A^{-1} 第一列 = [10/T³, -15/T⁴, 6/T⁵]。替代 colPivHouseholderQr：
+    // 这是 MINCO 每次代价评估的热路径（每段一次），3×3 QR 换闭式省掉大量重复分解。
+    Eigen::Vector3d bc;
+    bc(0) = 10.0 / (T * T * T);         // 10/T³  (alpha)
+    bc(1) = -15.0 / (T * T * T * T);    // -15/T⁴ (beta)
+    bc(2) = 6.0 / (T * T * T * T * T);  // 6/T⁵   (gamma)
+    return bc;
 }
 
 double MincoTrajectory::calcSmoothCost(std::vector<double> &grad_x)
@@ -540,17 +541,19 @@ void MincoTrajectory::solveQuintic(
         double c1 = v0(d);
         double c2 = a0(d) / 2.0;
 
-        Eigen::Matrix3d A;
-        A << T3, T4, T5,
-             3*T2, 4*T3, 5*T4,
-             6*T, 12*T2, 20*T3;
-
         Eigen::Vector3d b;
         b(0) = p1(d) - c0 - c1*T - c2*T2;
         b(1) = v1(d) - c1 - 2*c2*T;
         b(2) = a1(d) - 2*c2;
 
-        Eigen::Vector3d x = A.colPivHouseholderQr().solve(b);
+        // 闭式 A^{-1}·b（A 与 solveBackpropCoeffs 相同，det=2T⁹）：
+        // A^{-1} = [10/T³  -4/T²   1/(2T) ;
+        //          -15/T⁴   7/T³  -1/T²  ;
+        //           6/T⁵   -3/T⁴   1/(2T³)]
+        Eigen::Vector3d x;
+        x(0) = (10.0 / T3) * b(0) - (4.0 / T2) * b(1) + (0.5 / T) * b(2);
+        x(1) = -(15.0 / T4) * b(0) + (7.0 / T3) * b(1) - (1.0 / T2) * b(2);
+        x(2) = (6.0 / T5) * b(0) - (3.0 / T4) * b(1) + (0.5 / T3) * b(2);
 
         coeffs(0, d) = c0;
         coeffs(1, d) = c1;
