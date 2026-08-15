@@ -542,7 +542,7 @@ private:
             return PlanResult::FAILED;
         }
 
-        double ts;
+        double ts = 0.1;  // A* 采样间隔(s): getSamples 用其估算段数。曾未初始化 → UB (被 max(8,·) 掩盖)
         std::vector<Eigen::Vector2d> point_set, start_end_derivatives;
         kino_astar_->getSamples(ts, point_set, start_end_derivatives);
         if (point_set.size() < 2)

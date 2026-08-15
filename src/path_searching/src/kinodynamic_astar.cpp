@@ -656,8 +656,10 @@ namespace fast_planner
         }
 
         // Get point samples
+        // 段数下界 8、上界 20：waypoint 数直接决定 MINCO L-BFGS 变量数 (2*(N-1))，
+        // 不封顶会让长路径把变量推到几十维、拖慢 20ms 预算内的每拍迭代。
         int seg_num = floor(T_sum / ts);
-        seg_num = max(8, seg_num);
+        seg_num = std::max(8, std::min(seg_num, 20));
         ts = T_sum / double(seg_num);
         bool sample_shot_traj = is_shot_succ_;
         node = path_nodes_.back();
