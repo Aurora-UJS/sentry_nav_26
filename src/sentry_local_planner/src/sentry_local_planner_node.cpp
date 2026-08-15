@@ -835,26 +835,43 @@ private:
                     safety_margin_warn_, safety_margin_hard_,
                     current_pos_, safety_self_ignore_r_);
 
-                if (chk.hard())
+                // 违例持续性计数：坡脚等贴墙处 ESDF 会单拍闪烁（自转幽灵障碍，
+                // occ_timeout 3.5s 自愈），旧逻辑对单拍违例立即转移状态，造成
+                // 50ms 周期 BRAKE↔EXEC↔SLOWDOWN 抖动、车在坡脚表现为卡死。
+                // 真实障碍每拍持续存在 → 要求连续 2 拍(40ms) 才转移；
+                // 1.5m/s 下多走 6cm，可忽略；单拍幽灵不再引发急刹。
+                const bool warn_now = chk.warn() || chk.hard();
+                warn_streak_ = warn_now ? warn_streak_ + 1 : 0;
+                const bool hard_imminent =
+                    chk.hard() && (chk.first_hard_time - elapsed) < safety_imminent_time_;
+                hard_streak_ = hard_imminent ? hard_streak_ + 1 : 0;
+
+                if (hard_streak_ >= 2)
                 {
+                    // 连续迫近硬违例 → 刹停（真实碰撞路径，单拍闪烁不会到这）
                     Eigen::Vector2d hp = snap->traj.getPosition(chk.first_hard_time);
                     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
                                          "Traj hits obstacle in %.2fs (min esdf %.2fm) at (%.2f, %.2f), robot (%.2f, %.2f)",
                                          chk.first_hard_time - elapsed, chk.min_distance,
                                          hp(0), hp(1), current_pos_(0), current_pos_(1));
-                    if (chk.first_hard_time - elapsed < safety_imminent_time_)
-                        dispatch(FsmEvent::TRAJ_UNSAFE_IMMINENT);
-                    else
-                    {
-                        dispatch(FsmEvent::TRAJ_UNSAFE);
-                        if (state_ == FsmState::SLOWDOWN &&
-                            (this->now() - unsafe_since_).seconds() > brake_timeout_)
-                            dispatch(FsmEvent::UNSAFE_TIMEOUT);
-                    }
+                    dispatch(FsmEvent::TRAJ_UNSAFE_IMMINENT);
                     if (state_ == FsmState::BRAKE)
                         snap.reset();  // dispatch 已丢弃轨迹
                 }
-                else if (chk.warn())
+                else if (chk.hard())
+                {
+                    // 非迫近硬违例（或迫近首拍）：降速；SLOWDOWN 持续超时升级
+                    Eigen::Vector2d hp = snap->traj.getPosition(chk.first_hard_time);
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                                         "Traj hits obstacle in %.2fs (min esdf %.2fm) at (%.2f, %.2f), robot (%.2f, %.2f)",
+                                         chk.first_hard_time - elapsed, chk.min_distance,
+                                         hp(0), hp(1), current_pos_(0), current_pos_(1));
+                    dispatch(FsmEvent::TRAJ_UNSAFE);
+                    if (state_ == FsmState::SLOWDOWN &&
+                        (this->now() - unsafe_since_).seconds() > brake_timeout_)
+                        dispatch(FsmEvent::UNSAFE_TIMEOUT);
+                }
+                else if (warn_streak_ >= 2)
                 {
                     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                                          "Traj marginal in %.2fs (min esdf %.2fm), slowing",
@@ -1071,6 +1088,8 @@ private:
     double safety_imminent_time_ = 0.8;
     double slowdown_factor_ = 0.4;
     double brake_timeout_ = 0.5;
+    int warn_streak_ = 0;   // 连续 warn 拍数（防单拍闪烁抖动）
+    int hard_streak_ = 0;   // 连续迫近 hard 拍数（防单拍幽灵急刹）
     bool debug_mode_ = false;  // debug 模式: 参数热重载开关（仅启动时读取）
 
     Eigen::Vector2d final_goal_ = Eigen::Vector2d::Zero();
