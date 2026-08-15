@@ -12,6 +12,7 @@
  */
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -108,6 +109,8 @@ public:
         this->declare_parameter<double>("controller.corridor_enter_dist", 0.55);
         this->declare_parameter<double>("controller.corridor_exit_dist", 0.80);
         this->declare_parameter<double>("controller.corridor_preview_time", 1.2);
+        this->declare_parameter<double>("controller.corridor_side_probe", 0.30);
+        this->declare_parameter<double>("controller.wz_slew_rate", 8.0);
         this->declare_parameter<double>("controller.corridor_speed", 0.8);
         this->declare_parameter<double>("controller.corridor_align_speed", 0.2);
         this->declare_parameter<double>("controller.corridor_align_tol_deg", 20.0);
@@ -282,13 +285,19 @@ public:
 
         this->declare_parameter<double>("replan.frequency", 10.0);
         double replan_freq = this->get_parameter("replan.frequency").as_double();
+        // 重规划独立回调组：与 50Hz 控制/odom 回调组（默认组）并发，
+        // 规划耗时不再占用控制时隙。默认组内部仍串行（互斥），互不打架。
+        replan_cb_group_ =
+            this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         replan_timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0 / replan_freq),
-            std::bind(&SentryLocalPlannerNode::replanCallback, this));
+            std::bind(&SentryLocalPlannerNode::replanCallback, this),
+            replan_cb_group_);
 
         RCLCPP_INFO(this->get_logger(),
                     "Planner initialized: minco+mpc, ctrl@%.0fHz, safety horizon %.1fs",
                     ctrl_freq, safety_check_horizon_);
+
     }
 
 private:
@@ -314,9 +323,12 @@ private:
 
     enum class PlanResult { SUCCESS, FAILED, SKIPPED };
 
-    /** 状态机事件分发：转移由纯函数决定，进入新状态的副作用集中在这里 */
+    /** 状态机事件分发：转移由纯函数决定，进入新状态的副作用集中在这里。
+     *  多线程下 controlLoop(默认组) 与 replan(重规划组) 都可能调用 → 用 state_mutex_
+     *  串行化读-改-写，避免并发转移互相覆盖（丢一次转移会下一拍自愈，但仍应避免）。 */
     void dispatch(FsmEvent e)
     {
+        std::lock_guard<std::mutex> lk(state_mutex_);
         FsmState next = sentry_planner::fsmTransition(state_, e);
         if (next == state_)
             return;
@@ -971,6 +983,7 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::TimerBase::SharedPtr ctrl_timer_, replan_timer_;
+    rclcpp::CallbackGroup::SharedPtr replan_cb_group_;
 };
 
 int main(int argc, char **argv)
@@ -978,7 +991,12 @@ int main(int argc, char **argv)
     rclcpp::init(argc, argv);
     auto node = std::make_shared<SentryLocalPlannerNode>();
     node->initialize();
-    rclcpp::spin(node);
+    // 多线程 executor：重规划回调组与 50Hz 控制/odom 回调组并发执行，
+    // A*+MINCO (8~40ms) 不再阻塞控制回路（REVIEW #1 单线程丢拍根因）。
+    // 共享状态保护见 initialize 内的 callback group 划分 + dispatch/global_path 互斥锁。
+    rclcpp::executors::MultiThreadedExecutor exec(rclcpp::ExecutorOptions(), 2);
+    exec.add_node(node);
+    exec.spin();
     rclcpp::shutdown();
     return 0;
 }
