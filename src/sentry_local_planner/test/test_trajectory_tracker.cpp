@@ -57,6 +57,7 @@ TrajectoryTracker makeTracker(ConstEnv &env)
     cfg.corridor_enter_dist = 0.55;
     cfg.corridor_exit_dist = 0.80;
     cfg.corridor_preview_time = 1.2;
+    cfg.corridor_side_probe = 0.30;
     cfg.corridor_speed = 0.8;
     cfg.corridor_align_speed = 0.2;
     cfg.corridor_align_tol = 0.35;
@@ -65,7 +66,10 @@ TrajectoryTracker makeTracker(ConstEnv &env)
     cfg.slope_exit_rad = 0.070;   // ~4°
     cfg.yaw_align_kp = 3.0;
     cfg.max_align_wz = 2.5;
-    cfg.world_frame_cmd = true;  // linear 保持 odom 系，便于断言
+    cfg.wz_slew_rate = 1e9;       // 模式逻辑测试关闭角速度限速（限速行为单独测）
+    cfg.max_acc = 1e9;            // 关闭线速度限速（行为单独测）
+    cfg.min_turn_radius = 0.0;    // 关闭最小转弯半径压制（行为单独测）
+    cfg.world_frame_cmd = true;   // linear 保持 odom 系，便于断言
     TrajectoryTracker tracker;
     tracker.init(cfg, &env);
     return tracker;
@@ -158,6 +162,129 @@ TEST(TrackerMode, TailFirstIsAligned)
     double speed = std::hypot(cmd.linear.x, cmd.linear.y);
     EXPECT_NEAR(speed, 0.8, 1e-6);
     EXPECT_NEAR(cmd.angular.z, 0.0, 0.1);
+}
+
+/** 单侧墙环境：墙在 y=wall_y，ESDF=|y-wall_y|。用于验证"单侧贴墙不算窄道"。 */
+class WallEnv : public ConstEnv
+{
+public:
+    double wall_y = 0.0;
+
+    double getDistance(const Eigen::Vector2d &p) override
+    {
+        return std::fabs(p.y() - wall_y);
+    }
+};
+
+TEST(TrackerMode, OneSidedWallDoesNotAlign)
+{
+    // 轨迹贴墙 0.5m 沿墙走（开阔地另一侧）→ 旧逻辑(中心 ESDF<阈值)会误入对齐；
+    // 双侧判定应判为不窄：正常 MPC+自转绕行即可，不需要停转对齐。
+    WallEnv env;
+    auto tracker = makeTracker(env);
+    MincoTrajectory traj;
+    std::vector<Eigen::Vector2d> wps = {{0.0, 0.5}, {1.5, 0.5}, {3.0, 0.5}};
+    traj.setup(wps, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(),
+               Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(), 1.0, 1.0, -1.0);
+
+    auto cmd = tracker.compute({0.5, 0.5}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    EXPECT_FALSE(tracker.inNarrowMode());
+    EXPECT_DOUBLE_EQ(cmd.angular.z, kSpin);  // 保持自转
+}
+
+TEST(TrackerMode, WzSlewRateLimitsStep)
+{
+    ConstEnv env;  // 开阔
+    TrajectoryTracker::Config cfg;
+    cfg.spin_rate = 3.0;
+    cfg.ctrl_dt = 0.02;
+    cfg.wz_slew_rate = 10.0;   // 每拍限 0.2 rad/s
+    cfg.max_acc = 1e9;         // 线速度限速关闭 (本测试只看角速度)
+    cfg.world_frame_cmd = true;
+    cfg.corridor_enter_dist = 0.55;
+    cfg.corridor_exit_dist = 0.80;
+    TrajectoryTracker tracker;
+    tracker.init(cfg, &env);
+    auto traj = makeStraightTraj(3.0);
+
+    // 第一拍：目标 3.0 自转被限速到 0.2（阶跃变斜坡）
+    auto cmd = tracker.compute({0.5, 0.0}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    EXPECT_NEAR(cmd.angular.z, 0.2, 1e-9);
+
+    // 逐步爬升不超限，最终收敛到自转
+    for (int i = 0; i < 20; ++i)
+        cmd = tracker.compute({0.5, 0.0}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    EXPECT_NEAR(cmd.angular.z, 3.0, 1e-6);
+}
+
+TEST(TrackerMode, LinSlewRateLimitsStep)
+{
+    // 窄道对齐模式下速度从 0 阶跃到 0.8；线速度限速应把它变成斜坡（防坡上打滑）
+    ConstEnv env;
+    env.dist = 0.4;  // 触发窄道对齐
+    TrajectoryTracker::Config cfg;
+    cfg.ctrl_dt = 0.02;
+    cfg.max_acc = 2.0;           // 每拍限 0.04 m/s
+    cfg.corridor_enter_dist = 0.55;
+    cfg.corridor_exit_dist = 0.80;
+    cfg.corridor_speed = 0.8;
+    cfg.corridor_align_speed = 0.2;
+    cfg.corridor_align_tol = 0.35;
+    cfg.corridor_lookahead = 0.6;
+    cfg.slope_enter_rad = 0.122;
+    cfg.slope_exit_rad = 0.070;
+    cfg.yaw_align_kp = 3.0;
+    cfg.max_align_wz = 2.5;
+    cfg.wz_slew_rate = 1e9;
+    cfg.world_frame_cmd = true;
+    TrajectoryTracker tracker;
+    tracker.init(cfg, &env);
+    auto traj = makeStraightTraj(3.0);
+
+    // 第一拍: 目标 0.8 被限速到 0.04 (已对齐, yaw_err=0 → 目标速度 0.8)
+    auto cmd = tracker.compute({0.5, 0.0}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    double speed = std::hypot(cmd.linear.x, cmd.linear.y);
+    EXPECT_NEAR(speed, 0.04, 1e-9);
+
+    // 逐步爬升，最终收敛到 0.8
+    for (int i = 0; i < 25; ++i)
+        cmd = tracker.compute({0.5, 0.0}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    speed = std::hypot(cmd.linear.x, cmd.linear.y);
+    EXPECT_NEAR(speed, 0.8, 1e-6);
+}
+
+TEST(TrackerMode, MinTurnRadiusCapsWz)
+{
+    // 未对齐爬行 0.2 m/s 时，无半径限制 wz 会顶到 -2.4；min_turn_radius=0.6 应把它
+    // 压到 -v/R = -0.333 —— 转弯弧线半径不低于 0.6m，坡脚不再原地硬掰。
+    ConstEnv env;
+    env.dist = 0.4;  // 窄道 → 对齐
+    TrajectoryTracker::Config cfg;
+    cfg.ctrl_dt = 0.02;
+    cfg.max_acc = 1e9;
+    cfg.wz_slew_rate = 1e9;
+    cfg.corridor_enter_dist = 0.55;
+    cfg.corridor_exit_dist = 0.80;
+    cfg.corridor_speed = 0.8;
+    cfg.corridor_align_speed = 0.2;
+    cfg.corridor_align_tol = 0.35;
+    cfg.corridor_lookahead = 0.6;
+    cfg.yaw_align_kp = 3.0;
+    cfg.max_align_wz = 2.5;
+    cfg.min_turn_radius = 0.6;
+    cfg.slope_enter_rad = 0.122;
+    cfg.slope_exit_rad = 0.070;
+    cfg.world_frame_cmd = true;
+    TrajectoryTracker tracker;
+    tracker.init(cfg, &env);
+    auto traj = makeStraightTraj(3.0);
+
+    // 航向偏 0.8 rad (~46°) → 未对齐 → 爬行 0.2
+    auto cmd = tracker.compute({0.5, 0.0}, kZeroV, 0.8, 0.0, traj, 0.5, true);
+    EXPECT_TRUE(tracker.inNarrowMode());
+    double speed = std::hypot(cmd.linear.x, cmd.linear.y);
+    EXPECT_NEAR(speed, 0.2, 1e-6);
+    EXPECT_NEAR(cmd.angular.z, -0.2 / 0.6, 1e-9);  // 半径上限压制
 }
 
 TEST(TrackerMode, SlopeEnterExitHysteresis)
@@ -266,4 +393,16 @@ TEST(TrackerMode, RidgeNudgeSteersTowardCorridorCenter)
     EXPECT_TRUE(tracker.inNarrowMode());
     EXPECT_GT(cmd.linear.y, 0.05);  // 向走廊中心纠偏
     EXPECT_GT(cmd.linear.x, 0.0);
+}
+
+TEST(TrackerMode, TwoSidedCorridorDoesAlign)
+{
+    // 双侧墙 (y=±0.45 走廊，半宽 0.45 < enter)：双侧判定应判为窄道 → 对齐。
+    // 与 OneSidedWallDoesNotAlign 成对，锁定"双侧"语义。
+    CorridorEnv env;  // 走廊中心线 y=0, 半宽 0.45
+    auto tracker = makeTracker(env);
+    auto traj = makeStraightTraj(3.0);
+
+    tracker.compute({0.5, 0.0}, kZeroV, 0.0, 0.0, traj, 0.5, true);
+    EXPECT_TRUE(tracker.inNarrowMode());
 }
