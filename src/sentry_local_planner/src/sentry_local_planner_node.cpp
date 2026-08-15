@@ -183,12 +183,14 @@ public:
         this->declare_parameter<double>("replan.plan_lead", 0.15);
         this->declare_parameter<double>("replan.jps_lookahead", 2.5);
         this->declare_parameter<double>("replan.goal_clearance", 0.45);
+        this->declare_parameter<double>("replan.pursuit_speed", 1.5);
         this->declare_parameter<int>("replan.crawl_fail_threshold", 5);
         replan_deviation_      = this->get_parameter("replan.deviation").as_double();
         replan_refresh_period_ = this->get_parameter("replan.refresh_period").as_double();
         replan_plan_lead_      = this->get_parameter("replan.plan_lead").as_double();
         jps_lookahead_         = this->get_parameter("replan.jps_lookahead").as_double();
         goal_clearance_        = this->get_parameter("replan.goal_clearance").as_double();
+        pursuit_speed_         = this->get_parameter("replan.pursuit_speed").as_double();
         crawl_fail_threshold_  = this->get_parameter("replan.crawl_fail_threshold").as_int();
 
         // --- 卡滞检测参数 ---
@@ -251,12 +253,19 @@ public:
         global_path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/global_path", 10,
             [this](const nav_msgs::msg::Path::SharedPtr msg) {
-                global_waypoints_.clear();
+                // 多线程下与重规划线程并发读 global_waypoints_，重建必须持锁：
+                // 旧代码 clear+emplace 会让重规划线程迭代到被清空的 vector（崩溃）。
+                std::vector<Eigen::Vector2d> wps;
+                wps.reserve(msg->poses.size());
                 for (auto &pose : msg->poses)
-                    global_waypoints_.emplace_back(pose.pose.position.x, pose.pose.position.y);
-                has_global_path_ = !global_waypoints_.empty();
+                    wps.emplace_back(pose.pose.position.x, pose.pose.position.y);
+                {
+                    std::lock_guard<std::mutex> lk(global_path_mutex_);
+                    global_waypoints_ = std::move(wps);
+                    has_global_path_ = !global_waypoints_.empty();
+                }
                 RCLCPP_INFO(this->get_logger(), "Received global path: %zu waypoints",
-                            global_waypoints_.size());
+                            msg->poses.size());
             });
 
         // --- Publishers ---
@@ -339,11 +348,13 @@ private:
         final_goal_ = Eigen::Vector2d(msg->pose.position.x, msg->pose.position.y);
         has_final_goal_ = true;
         consec_plan_fail_ = 0;
-        // 旧目标的全局路径立即作废，等全局规划器发新路径（否则沿旧路走会静默偏航）
-        has_global_path_ = false;
-        global_waypoints_.clear();
+        // 不在这里清空 global_waypoints_：全局规划器 JPS 只要 ~1ms，新路径常比本回调
+        // （与 50Hz 控制/60000pt 点云同组串行）先到；无条件清空会把刚到手的新路径 wipe 掉
+        // → 局部规划器永远 "waiting for global path"。改为在 replanCallback 校验路径终点
+        // 是否落在当前目标附近：旧路径作废、新路径到达后自然覆盖。
         if ((final_goal_ - current_pos_).norm() <= 2.0 * jps_lookahead_)
-            dispatchPlanResult(planToGoal(final_goal_));
+            dispatchPlanResult(planToGoal(final_goal_, Eigen::Vector2d::Zero(),
+                                          current_pos_, current_vel_));
         else
         {
             // 远目标不直接规划（先验图之外的坑/封闭区只有 JPS 知道）：
@@ -388,6 +399,28 @@ private:
             remain -= len;
         }
         return path.back();
+    }
+
+    /**
+     * 全局路径在点 p 处的单位切向（前向）。p 通常是 pursuitPointOnPath 的返回值，
+     * 用于把局部轨迹终点速度从 0 改成"沿路径前进"，消除每个 pursuit 点的人工刹停。
+     */
+    static Eigen::Vector2d pathTangent(const std::vector<Eigen::Vector2d> &path,
+                                       const Eigen::Vector2d &p)
+    {
+        if (path.size() < 2) return Eigen::Vector2d::Zero();
+        double best_d2 = std::numeric_limits<double>::max();
+        int best_i = 0;
+        for (int i = 0; i + 1 < (int)path.size(); ++i)
+        {
+            Eigen::Vector2d ab = path[i + 1] - path[i];
+            double L2 = ab.squaredNorm();
+            double t = L2 < 1e-12 ? 0.0 : std::clamp((p - path[i]).dot(ab) / L2, 0.0, 1.0);
+            double d2 = (path[i] + t * ab - p).squaredNorm();
+            if (d2 < best_d2) { best_d2 = d2; best_i = i; }
+        }
+        Eigen::Vector2d d = path[best_i + 1] - path[best_i];
+        return d.norm() < 1e-12 ? Eigen::Vector2d::Zero() : d.normalized();
     }
 
     /**
@@ -466,9 +499,13 @@ private:
         }
     }
 
-    PlanResult planToGoal(Eigen::Vector2d goal_pt)
+    PlanResult planToGoal(Eigen::Vector2d goal_pt, Eigen::Vector2d goal_vel,
+                          Eigen::Vector2d start_pos, Eigen::Vector2d start_vel)
     {
-        Eigen::Vector2d diff = goal_pt - current_pos_;
+        // 规划工作对象 kino_astar_/minco_traj_ 非线程安全，而 goalCallback(默认组) 与
+        // replanCallback(重规划组) 都可能触发规划 → plan_mutex_ 串行化。
+        std::lock_guard<std::mutex> lk(plan_mutex_);
+        Eigen::Vector2d diff = goal_pt - start_pos;
         // 执行中让最后一段轨迹自然跑完（near_end 邻域内不打断）；
         // 无轨迹（IDLE/BRAKE 后）必须照常规划——旧版无条件 SKIPPED 会让
         // 近距目标（如隔台沿 0.87m 的 pursuit 点）永远不被尝试
@@ -478,7 +515,7 @@ private:
         this->get_parameter("sdf_map.local_update_range_x", local_range);
         local_range -= 0.5;
         if (diff.norm() > local_range)
-            goal_pt = current_pos_ + diff.normalized() * local_range;
+            goal_pt = start_pos + diff.normalized() * local_range;
 
         Eigen::Vector2d map_origin, map_size;
         sdf_map_->getRegion(map_origin, map_size);
@@ -509,8 +546,6 @@ private:
         // 而不是从实测状态重启 —— 否则每次重规划都把参考速度打回起步段，
         // 10Hz 重规划下参考速度永远爬不上去（实测 5.4m 直线平均有效速度仅 0.27m/s）。
         // 跟踪偏差过大时回退到实测状态重锚（MPC 已跟不上参考，续接无意义）。
-        Eigen::Vector2d start_pos = current_pos_;
-        Eigen::Vector2d start_vel = current_vel_;
         Eigen::Vector2d start_acc = Eigen::Vector2d::Zero();
         rclcpp::Time traj_t0 = this->now();
         auto prev = getActiveTraj();
@@ -519,7 +554,7 @@ private:
             double elapsed = (this->now() - prev->start_time).seconds();
             double t_ref = std::min(elapsed + replan_plan_lead_, prev->duration);
             Eigen::Vector2d p_ref = prev->traj.getPosition(t_ref);
-            if ((p_ref - current_pos_).norm() < replan_deviation_)
+            if ((p_ref - start_pos).norm() < replan_deviation_)
             {
                 start_pos = p_ref;
                 start_vel = prev->traj.getVelocity(t_ref);
@@ -531,7 +566,7 @@ private:
         // A*
         kino_astar_->reset();
         int result = kino_astar_->search(start_pos, start_vel, start_acc,
-                                          goal_pt, Eigen::Vector2d::Zero(), true);
+                                          goal_pt, goal_vel, true);
         if (result == KinodynamicAstar::NO_PATH)
         {
             // 阶段归因: 失败必须可诊断（曾静默失败 762 次无从归因）
@@ -587,19 +622,44 @@ private:
     void replanCallback()
     {
         if (!has_odom_ || !has_final_goal_) return;
-        if ((final_goal_ - current_pos_).norm() < 1.0) return;
 
-        Eigen::Vector2d local_goal = final_goal_;
-        if (has_global_path_ && global_waypoints_.size() >= 2)
-            local_goal = pursuitPointOnPath(global_waypoints_, current_pos_, jps_lookahead_);
-        else if ((final_goal_ - current_pos_).norm() > 2.0 * jps_lookahead_)
+        // 多线程快照：本回调与 odom/goal/global_path 回调组并发，共享状态在入口
+        // 一次性拷贝，避免中途被改写（尤其 global_waypoints_ 的迭代会撞上 clear）。
+        Eigen::Vector2d pos_snap = current_pos_;
+        Eigen::Vector2d vel_snap = current_vel_;
+        Eigen::Vector2d goal_snap = final_goal_;
+        std::vector<Eigen::Vector2d> wp_snap;
+        bool has_global_snap = false;
+        {
+            std::lock_guard<std::mutex> lk(global_path_mutex_);
+            wp_snap = global_waypoints_;
+            has_global_snap = has_global_path_;
+        }
+
+        if ((goal_snap - pos_snap).norm() < 1.0) return;
+
+        Eigen::Vector2d local_goal = goal_snap;
+        Eigen::Vector2d local_goal_vel = Eigen::Vector2d::Zero();
+        // 路径有效性：终点必须落在当前目标附近（JPS 路径终点=目标，push 后处理不动端点）。
+        // 目标变了但新路径还没到 → 旧路径作废，视同无路径等待；新路径到达后自然覆盖。
+        bool path_valid = has_global_snap && wp_snap.size() >= 2 &&
+                          (wp_snap.back() - goal_snap).norm() < 1.0;
+        if (path_valid)
+        {
+            local_goal = pursuitPointOnPath(wp_snap, pos_snap, jps_lookahead_);
+            // pursuit 点是中途点而非终点：终点速度取全局路径切向 × pursuit_speed，
+            // 不再在每个 2.5m 前瞻点强制刹停。终点速度>0 → 局部轨迹保持巡航、
+            // 减速段缩短 → 峰值加速度更缓（配合 max_acc 安全阀，不易侧翻）。
+            local_goal_vel = pathTangent(wp_snap, local_goal) * pursuit_speed_;
+        }
+        else if ((goal_snap - pos_snap).norm() > 2.0 * jps_lookahead_)
         {
             // 远目标必须有全局路径兜底：先验图知道坑/跌落/封闭区，局部点云图
             // 不知道。JPS 未出路径（未达/不可达）时不做长距自由规划，原地等待。
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                                  "Far goal (%.1fm) without global path - waiting for JPS "
                                  "(unreachable in prior map?)",
-                                 (final_goal_ - current_pos_).norm());
+                                 (goal_snap - pos_snap).norm());
             return;
         }
 
@@ -617,14 +677,14 @@ private:
         {
             double elapsed = (this->now() - snap->start_time).seconds();
             double deviation =
-                (snap->traj.getPosition(std::min(elapsed, snap->duration)) - current_pos_).norm();
+                (snap->traj.getPosition(std::min(elapsed, snap->duration)) - pos_snap).norm();
             need_replan = deviation > replan_deviation_ ||
                           (local_goal - last_planned_goal_).norm() > 0.3 ||
                           (this->now() - last_plan_time_).seconds() > replan_refresh_period_;
         }
 
         if (need_replan)
-            dispatchPlanResult(planToGoal(local_goal));
+            dispatchPlanResult(planToGoal(local_goal, local_goal_vel, pos_snap, vel_snap));
     }
 
     void controlLoop()
@@ -866,6 +926,7 @@ private:
     double replan_plan_lead_ = 0.15;
     double jps_lookahead_ = 2.5;
     double goal_clearance_ = 0.45;
+    double pursuit_speed_ = 1.5;   // pursuit 点终点速度幅值 (m/s)
 
     // 卡滞检测（本体感知脱困）
     double stuck_timeout_ = 0.8;
@@ -880,6 +941,9 @@ private:
     rclcpp::Time unsafe_since_;
 
     std::mutex traj_mutex_;
+    std::mutex state_mutex_;        // 串行化 dispatch() 状态转移（控制/重规划线程并发调用）
+    std::mutex global_path_mutex_;  // 保护 global_waypoints_/has_global_path_（订阅写 vs 重规划读）
+    std::mutex plan_mutex_;         // 串行化 planToGoal（保护 kino_astar_/minco_traj_ 工作对象）
     TrajSnapshotPtr active_traj_;
 
     // 安全监控参数
