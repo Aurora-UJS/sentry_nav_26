@@ -1,5 +1,9 @@
 sentry_local_planner:
   ros__parameters:
+    # 调试模式: true 时启用参数热重载 (ros2 param set 即时生效，调参用)。
+    # 比赛/真车运行时保持 false —— 锁死参数，防止误改扰动执行中的轨迹。
+    debug_mode: false
+
     # --- SDFMap 参数 ---
     manager:
       odometry: "/Odometry"
