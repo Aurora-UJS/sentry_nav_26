@@ -1,0 +1,10 @@
+# 集成测试用参数覆盖：让局部规划器的 SDFMap 直接加载静态先验图 (RMUC 2025)，
+# 不依赖 LIO 点云。作为 planner_params.yaml 之后的第二个 --params-file 传入 (后文件覆盖前文件)。
+sentry_local_planner:
+  ros__parameters:
+    sdf_map:
+      use_global_map: true
+      global_map_num: 1
+      global_map_path:
+        - "/workspace/sentry_nav_26/src/sentry_bringup/map/rmuc_2025.yaml"
+      use_cloud_input: false

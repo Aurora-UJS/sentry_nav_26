@@ -119,41 +119,17 @@ public:
         this->declare_parameter<double>("controller.slope_exit_deg", 4.0);
         this->declare_parameter<double>("controller.yaw_align_kp", 3.0);
         this->declare_parameter<double>("controller.max_align_wz", 2.5);
+        this->declare_parameter<double>("controller.min_turn_radius", 0.6);
         this->declare_parameter<int>("mpc.horizon", 10);
         this->declare_parameter<double>("mpc.q_pos", 10.0);
         this->declare_parameter<double>("mpc.q_vel", 1.0);
         this->declare_parameter<double>("mpc.r_acc", 0.1);
 
         double ctrl_freq = this->get_parameter("controller.frequency").as_double();
-
-        sentry_planner::TrajectoryTracker::Config tcfg;
-        tcfg.max_vel = mv;
-        tcfg.max_acc = ma;
-        tcfg.ctrl_dt = 1.0 / ctrl_freq;
-        tcfg.spin_rate = this->get_parameter("controller.spin_rate").as_double();
-        tcfg.corridor_enter_dist = this->get_parameter("controller.corridor_enter_dist").as_double();
-        tcfg.corridor_exit_dist = this->get_parameter("controller.corridor_exit_dist").as_double();
-        tcfg.corridor_preview_time = this->get_parameter("controller.corridor_preview_time").as_double();
-        tcfg.corridor_speed = this->get_parameter("controller.corridor_speed").as_double();
-        tcfg.corridor_align_speed = this->get_parameter("controller.corridor_align_speed").as_double();
-        tcfg.corridor_align_tol =
-            this->get_parameter("controller.corridor_align_tol_deg").as_double() * M_PI / 180.0;
-        tcfg.corridor_lookahead = this->get_parameter("controller.corridor_lookahead").as_double();
-        tcfg.slope_enter_rad =
-            this->get_parameter("controller.slope_enter_deg").as_double() * M_PI / 180.0;
-        tcfg.slope_exit_rad =
-            this->get_parameter("controller.slope_exit_deg").as_double() * M_PI / 180.0;
-        tcfg.yaw_align_kp = this->get_parameter("controller.yaw_align_kp").as_double();
-        tcfg.max_align_wz = this->get_parameter("controller.max_align_wz").as_double();
-        tcfg.mpc_horizon = this->get_parameter("mpc.horizon").as_int();
-        tcfg.mpc_q_pos = this->get_parameter("mpc.q_pos").as_double();
-        tcfg.mpc_q_vel = this->get_parameter("mpc.q_vel").as_double();
-        tcfg.mpc_r_acc = this->get_parameter("mpc.r_acc").as_double();
         // world: 输出 odom 系速度到 /cmd_vel_world，由 chassis_cmd_node（真车=电控）
         // 用高频陀螺 yaw 旋转；body: 旧行为，本节点用 LIO yaw 旋转后直发 /cmd_vel
         this->declare_parameter<std::string>("controller.cmd_frame", "world");
-        std::string cmd_frame = this->get_parameter("controller.cmd_frame").as_string();
-        tcfg.world_frame_cmd = (cmd_frame == "world");
+        auto tcfg = loadTrackerConfig();
         tracker_.init(tcfg, edt_env_.get());
 
         // --- 执行安全监控参数 ---
@@ -298,6 +274,24 @@ public:
                     "Planner initialized: minco+mpc, ctrl@%.0fHz, safety horizon %.1fs",
                     ctrl_freq, safety_check_horizon_);
 
+        // 参数热重载（仅 debug 模式）：比赛/真车运行时锁死参数，避免误改参数
+        // 扰动正在执行的轨迹；只有 debug_mode:=true 才注册 set 回调。
+        this->declare_parameter<bool>("debug_mode", false);
+        debug_mode_ = this->get_parameter("debug_mode").as_bool();
+        if (debug_mode_)
+        {
+            this->add_on_set_parameters_callback(
+                [this](const std::vector<rclcpp::Parameter> &ps) {
+                    return this->onParamChange(ps);
+                });
+            RCLCPP_WARN(this->get_logger(),
+                        "debug_mode=true: parameter hot-reload ENABLED (ros2 param set 即时生效)");
+        }
+        else
+        {
+            RCLCPP_INFO(this->get_logger(),
+                        "debug_mode=false: parameter hot-reload disabled (改参需重启)");
+        }
     }
 
 private:
@@ -319,6 +313,115 @@ private:
     {
         std::lock_guard<std::mutex> lk(traj_mutex_);
         active_traj_ = std::move(snap);
+    }
+
+    /** 从参数服务器组装 TrajectoryTracker 配置 (init 与热重载共用) */
+    sentry_planner::TrajectoryTracker::Config loadTrackerConfig()
+    {
+        sentry_planner::TrajectoryTracker::Config tcfg;
+        double mv = 3.0, ma = 3.0;
+        this->get_parameter("search.max_vel", mv);
+        this->get_parameter("search.max_acc", ma);
+        tcfg.max_vel = mv;
+        tcfg.max_acc = ma;
+        tcfg.ctrl_dt = 1.0 / this->get_parameter("controller.frequency").as_double();
+        tcfg.spin_rate = this->get_parameter("controller.spin_rate").as_double();
+        tcfg.corridor_enter_dist = this->get_parameter("controller.corridor_enter_dist").as_double();
+        tcfg.corridor_exit_dist = this->get_parameter("controller.corridor_exit_dist").as_double();
+        tcfg.corridor_preview_time = this->get_parameter("controller.corridor_preview_time").as_double();
+        tcfg.corridor_side_probe = this->get_parameter("controller.corridor_side_probe").as_double();
+        tcfg.wz_slew_rate = this->get_parameter("controller.wz_slew_rate").as_double();
+        tcfg.corridor_speed = this->get_parameter("controller.corridor_speed").as_double();
+        tcfg.corridor_align_speed = this->get_parameter("controller.corridor_align_speed").as_double();
+        tcfg.corridor_align_tol =
+            this->get_parameter("controller.corridor_align_tol_deg").as_double() * M_PI / 180.0;
+        tcfg.corridor_lookahead = this->get_parameter("controller.corridor_lookahead").as_double();
+        tcfg.slope_enter_rad =
+            this->get_parameter("controller.slope_enter_deg").as_double() * M_PI / 180.0;
+        tcfg.slope_exit_rad =
+            this->get_parameter("controller.slope_exit_deg").as_double() * M_PI / 180.0;
+        tcfg.yaw_align_kp = this->get_parameter("controller.yaw_align_kp").as_double();
+        tcfg.max_align_wz = this->get_parameter("controller.max_align_wz").as_double();
+        tcfg.min_turn_radius = this->get_parameter("controller.min_turn_radius").as_double();
+        tcfg.mpc_horizon = this->get_parameter("mpc.horizon").as_int();
+        tcfg.mpc_q_pos = this->get_parameter("mpc.q_pos").as_double();
+        tcfg.mpc_q_vel = this->get_parameter("mpc.q_vel").as_double();
+        tcfg.mpc_r_acc = this->get_parameter("mpc.r_acc").as_double();
+        // 注意: cmd_frame 热改会造成输出帧与发布话题不一致，重启才安全。
+        tcfg.world_frame_cmd =
+            (this->get_parameter("controller.cmd_frame").as_string() == "world");
+        return tcfg;
+    }
+
+    /** 参数热重载回调（仅 debug_mode=true 时注册）:
+     *  controller./mpc./safety./replan./stuck. 前缀参数 ros2 param set 即时生效 */
+    rcl_interfaces::msg::SetParametersResult onParamChange(
+        const std::vector<rclcpp::Parameter> &params)
+    {
+        bool tracker_dirty = false, safety_dirty = false, replan_dirty = false,
+             stuck_dirty = false;
+        for (const auto &p : params)
+        {
+            const std::string &n = p.get_name();
+            if (n.rfind("controller.", 0) == 0 || n.rfind("mpc.", 0) == 0)
+                tracker_dirty = true;
+            else if (n.rfind("safety.", 0) == 0)
+                safety_dirty = true;
+            else if (n.rfind("replan.", 0) == 0)
+                replan_dirty = true;
+            else if (n.rfind("stuck.", 0) == 0)
+                stuck_dirty = true;
+        }
+
+        if (tracker_dirty)
+        {
+            // 50Hz 控制线程并发读 cfg_：字段为对齐 double，单字段写入原子，
+            // 跨字段撕裂最多影响一拍，调参场景可接受。
+            auto tcfg = loadTrackerConfig();
+            tracker_.updateConfig(tcfg);
+            corridor_enter_dist_ = tcfg.corridor_enter_dist;
+            RCLCPP_INFO(this->get_logger(),
+                        "Tracker config hot-reloaded: spin=%.1f, enter=%.2f, "
+                        "min_turn_radius=%.2f, wz_slew=%.1f",
+                        tcfg.spin_rate, tcfg.corridor_enter_dist,
+                        tcfg.min_turn_radius, tcfg.wz_slew_rate);
+        }
+        if (safety_dirty)
+        {
+            safety_check_horizon_ = this->get_parameter("safety.check_horizon").as_double();
+            safety_check_dt_      = this->get_parameter("safety.check_dt").as_double();
+            safety_margin_warn_   = this->get_parameter("safety.margin_warn").as_double();
+            safety_margin_hard_   = this->get_parameter("safety.margin_hard").as_double();
+            safety_exit_hyst_     = this->get_parameter("safety.exit_hysteresis").as_double();
+            safety_self_ignore_r_ = this->get_parameter("safety.self_ignore_radius").as_double();
+            safety_imminent_time_ = this->get_parameter("safety.imminent_time").as_double();
+            slowdown_factor_      = this->get_parameter("safety.slowdown_factor").as_double();
+            brake_timeout_        = this->get_parameter("safety.brake_timeout").as_double();
+            brake_settle_time_    = this->get_parameter("safety.brake_settle_time").as_double();
+            brake_settle_vel_     = this->get_parameter("safety.brake_settle_vel").as_double();
+            RCLCPP_INFO(this->get_logger(),
+                        "Safety params hot-reloaded: warn=%.2f hard=%.2f",
+                        safety_margin_warn_, safety_margin_hard_);
+        }
+        if (replan_dirty)
+        {
+            replan_deviation_      = this->get_parameter("replan.deviation").as_double();
+            replan_refresh_period_ = this->get_parameter("replan.refresh_period").as_double();
+            replan_plan_lead_      = this->get_parameter("replan.plan_lead").as_double();
+            jps_lookahead_         = this->get_parameter("replan.jps_lookahead").as_double();
+            goal_clearance_        = this->get_parameter("replan.goal_clearance").as_double();
+            pursuit_speed_         = this->get_parameter("replan.pursuit_speed").as_double();
+            crawl_fail_threshold_  = this->get_parameter("replan.crawl_fail_threshold").as_int();
+        }
+        if (stuck_dirty)
+        {
+            stuck_timeout_     = this->get_parameter("stuck.timeout").as_double();
+            stuck_inject_dist_ = this->get_parameter("stuck.inject_dist").as_double();
+        }
+
+        rcl_interfaces::msg::SetParametersResult res;
+        res.successful = true;
+        return res;
     }
 
     enum class PlanResult { SUCCESS, FAILED, SKIPPED };
@@ -968,6 +1071,7 @@ private:
     double safety_imminent_time_ = 0.8;
     double slowdown_factor_ = 0.4;
     double brake_timeout_ = 0.5;
+    bool debug_mode_ = false;  // debug 模式: 参数热重载开关（仅启动时读取）
 
     Eigen::Vector2d final_goal_ = Eigen::Vector2d::Zero();
     bool has_final_goal_ = false;
