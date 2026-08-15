@@ -8,13 +8,15 @@
 
 - **LIO 定位**：基于 [Small Point-LIO](https://github.com/Aurora-UJS/small_point_lio)，输出高频 `/Odometry`（含 ESKF twist）与配准点云 `/cloud_registered`
 - **在线 2D 建图**：log-odds 占用栅格 + 法向量地形分类（墙面成障、≤30° 坡面放行）+ Felzenszwalb 两遍 ESDF + 占据超时自愈（`plan_env`）
-- **全局规划**：JPS（Jump Point Search）+ 静态先验 PGM 地图（`sentry_global_planner`）
-- **局部规划**：Kinodynamic A* + 多项式 Shot 直达（`path_searching`）；ESDF 验收（薄障碍免疫）+ 失败部分路径打捞 + 搜索时间预算
-- **轨迹优化**：MINCO 五次多项式 + L-BFGS（NLopt），平滑/避障/可行性/单向逆行多目标
-- **轨迹跟踪**：50 Hz LDLT-MPC（10 步预测 horizon）+ 开阔地自转扫描；窄道/坡道对齐模式（迟滞触发，停自转、航向对齐、恒低速直穿）
-- **执行安全与脱困**：50 Hz 轨迹前瞻监控 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯（BRAKE 静置降级出口，无吸收态）；卡滞虚拟障碍注入侧移 + 窄道爬行兜底
+- **全局规划**：JPS（Jump Point Search）+ 静态先验 PGM 地图 + oneway 区立面软净空（全局路径主动远离 90° 立面，`sentry_global_planner`）
+- **局部规划**：Kinodynamic A* + 多项式 Shot 直达（`path_searching`）；ESDF 验收（薄障碍免疫）+ 失败部分路径打捞 + 搜索时间预算；多线程 executor 隔离规划/控制（重规划不再阻塞 50Hz 回路）
+- **轨迹优化**：MINCO 五次多项式 + L-BFGS（NLopt），平滑/避障/可行性/单向逆行多目标；3×3 Hermite 闭式逆替代 QR 分解、动态障碍解析梯度（`evaluateCoarseEDTWithGrad`）
+- **轨迹跟踪**：50 Hz LDLT-MPC（10 步预测 horizon）+ 开阔地自转扫描；窄道/坡道对齐模式（**双侧净空**迟滞触发，停自转、航向对齐、恒低速直穿）+ 角/线速度限速与最小转弯半径平滑
+- **执行安全与脱困**：50 Hz 轨迹前瞻监控（违例需**连续 2 拍**才转移状态，幽灵单拍不再急刹抖动）+ IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯（BRAKE 静置降级出口，无吸收态）；卡滞虚拟障碍注入侧移 + 窄道爬行兜底
+- **pursuit 终点速度非零化**：局部轨迹终点取全局路径切向 × `pursuit_speed`，消除每个前瞻点的人工刹停（反复减速点头）
 - **指令架构**：导航栈输出世界系速度 `/cmd_vel_world`，底盘侧（仿真 `chassis_cmd_node` / 真车电控 MCU）用高频陀螺 yaw 旋转到机体系——自转下 LIO yaw 有 50~70ms 龄期，不可用于 50Hz 旋转
 - **可通行性标注层**：离线 `.trav.yaml` 三态标注（free/obstacle/oneway），JPS 软代价 + A*/MINCO 硬约束，RViz 绘制插件（OPT-IN 默认关）
+- **debug 参数热重载**：`debug_mode:=true` 时 `ros2 param set` 即时生效（controller/mpc/safety/replan/stuck 前缀）；比赛/真车保持 false 锁死参数
 - **仿真环境**：RMUC 2025 赛场（[`rm_sim_26`](https://github.com/Neomelt/rm_sim_26)）+ Livox 雷达 / IMU 桥接；支持 RGL（NVIDIA GPU 高精度 Mid360）与内置 `gpu_lidar` 双模式（`lidar_mode`）
 - **中间件**：推荐 `rmw_zenoh_cpp`，大点云吞吐与多机场景表现优于 DDS
 
@@ -91,7 +93,7 @@ small_point_lio  ──►  /Odometry (高频位姿)
    ├──► sentry_global_planner (JPS, 静态先验地图 + 可通行性标注)
    │       └─ /global_path  (nav_msgs/Path)
    │
-   └──► sentry_local_planner
+   └──► sentry_local_planner (MultiThreadedExecutor: 重规划独立回调组, 不阻塞 50Hz 控制)
            ├─ 订阅 /Odometry, /goal_pose, /global_path
            ├─ KinodynamicAstar 在 EDTEnvironment 上搜索 (10Hz 按需重规划)
            ├─ MINCO 五次轨迹 + L-BFGS 优化 (粗 8ms / 精 12ms)
@@ -330,14 +332,20 @@ timeout 15 ros2 run small_point_lio small_point_lio_node \
 
 | 项 | 默认 | 说明 |
 |---|---|---|
+| `debug_mode` | false | 参数热重载总开关：true 时 `ros2 param set` 即时生效（调参用）；比赛/真车保持 false 锁死参数 |
 | `controller.frequency` | 50 Hz | MPC 控制频率 |
-| `replan.frequency` | 10 Hz | 重规划**检查**频率；按需触发（无轨迹/偏差超限/目标移动/周期刷新），非每拍全量重规划 |
+| `replan.frequency` | 10 Hz | 重规划**检查**频率；按需触发（无轨迹/偏差超限/目标移动/周期刷新），非每拍全量重规划；重规划运行在独立回调组，不阻塞 50Hz 控制 |
 | `search.max_vel / max_acc` | 3.0 / 2.0 | 动力学上限（acc 3.0 在 3 rad/s 自转下实测侧翻，降 2.0）|
 | `search.accept_clearance` | 0.28 m | A* ESDF 验收阈值 = robot_radius − res/2；阈值链 0.28 > warn 0.20 > hard 0.15 |
 | `search.max_search_time_ms` | 40 ms | A* 时间预算：目标不可达时防全域搜索拖死重规划 |
-| `safety.margin_warn / margin_hard` | 0.20 / 0.15 m | 执行监控分级阈值（warn 降速 / hard 迫近才刹停）|
-| `controller.corridor_enter/exit_dist` | 0.55 / 0.80 m | 窄道对齐模式进/出迟滞（前瞻 min-ESDF）|
+| `safety.margin_warn / margin_hard` | 0.20 / 0.15 m | 执行监控分级阈值（warn 降速 / hard 迫近才刹停）；违例需**连续 2 拍**才转移状态，单拍幽灵（occ_timeout 自愈）不引发急刹抖动 |
+| `controller.corridor_enter/exit_dist` | 0.30 / 0.80 m | 窄道对齐模式进/出迟滞：轨迹**两侧**侧向采样点 ESDF 都低于阈值才算窄道（单侧贴墙/贴柱不算）|
+| `controller.corridor_side_probe` | 0.30 m | 窄道判定侧向探测距离（轨迹法向两侧）|
+| `controller.wz_slew_rate` | 8.0 rad/s² | 输出角速度限速率：自转↔对齐切换平滑过渡 |
+| `controller.min_turn_radius` | 0.6 m | 对齐模式最小转弯半径 R=v/\|wz\| 下限，防小半径转向在坡脚/台阶沿别住轮子 |
 | `controller.slope_enter/exit_deg` | 7° / 4° | 坡道对齐模式进/出迟滞（机身倾角）|
+| `replan.jps_lookahead` | 2.5 m | JPS 路径加密跟随：局部目标取路径前方此弧长处 |
+| `replan.pursuit_speed` | 1.5 m/s | 局部终点巡航速度：终点速度 = 全局路径切向 × 此值（0 为旧行为，每个前瞻点刹停）|
 | `replan.crawl_fail_threshold` | 5 | 规划连败此数后开启窄道爬行兜底 |
 | `mpc.horizon` | 10 | 预测步数（horizon = N · dt = 0.2s）|
 | `mpc.q_pos / q_vel / r_acc` | 10 / 1 / 0.1 | MPC 状态/输入权重 |
@@ -406,13 +414,15 @@ ros2 launch sentry_bringup bringup.launch.py \
 | 视锥清除 | ❌ | 未实现 |
 | 可通行性融合层 | ❌ | 未实现（occupancy + slope + clearance + roughness 在线融合）|
 | 可通行性标注层（单向/方向）| ✅ | `.trav.yaml`（free/obstacle/oneway）贯穿 JPS 软代价 / A*+MINCO 硬约束；RViz 标注插件；OPT-IN 默认关（`regions: []` 即 disabled），详见 `docs/TRAVERSABILITY.md` |
-| 全局规划 (JPS, 静态先验) | ✅ | 完整可用 |
+| 全局规划 (JPS, 静态先验) | ✅ | 完整可用；oneway 区立面软净空（`getOnewayDistance` chamfer 距离场折入 ESDF 代价，全局路径主动远离 90° 立面，软代价不硬挡）|
 | 全局规划在线模式 | 🟡 | `OnlineMapProxy` 已接入 JPS（global_planner_node.cpp `online` 分支），但未端到端验证；直接启用会因缺 `sdf_map.*` 参数崩溃，需先补参数接线 |
-| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF 验收（accept_clearance 0.28，薄障碍免疫）+ near_end 失败继续搜 + 部分路径打捞 + 搜索时间预算 + 可通行性标注检查（obstacle/oneway）|
-| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS；footprint + Lipschitz 剪枝 + 单向逆行软代价 |
+| Kinodynamic A* | ✅ | 二阶动力学 + OBVP shot；ESDF 验收（accept_clearance 0.28，薄障碍免疫）+ near_end 失败继续搜 + 部分路径打捞 + 搜索时间预算 + 可通行性标注检查（obstacle/oneway）；getSamples 采样段数封顶 [8,20] |
+| MINCO 轨迹优化 | ✅ | 五次多项式 + L-BFGS；footprint + Lipschitz 剪枝 + 单向逆行软代价；3×3 Hermite 闭式逆替代 QR（87.6x）+ 动态障碍解析梯度 |
 | MPC 跟踪 | ✅ | LDLT，软约束 |
-| 执行中轨迹安全监控 | ✅ | 50Hz 前瞻检查 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯 + BRAKE 静置超时出口（gtest + RMUC 仿真验证）|
-| 窄道/坡道对齐模式 | ✅ | 前瞻 min-ESDF/倾角触发（迟滞），停自转+航向对齐+纯追踪恒速直穿；爬行兜底 |
+| 多线程规划/控制隔离 | ✅ | MultiThreadedExecutor(2) + 重规划独立回调组 + state/global_path/plan 三把互斥锁；轨迹快照交换 |
+| 执行中轨迹安全监控 | ✅ | 50Hz 前瞻检查 + IDLE/EXEC/SLOWDOWN/BRAKE 降级阶梯 + BRAKE 静置超时出口 + 违例连续 2 拍才转移（幽灵单拍不抖）（gtest + RMUC 仿真验证）|
+| 窄道/坡道对齐模式 | ✅ | **双侧净空**/倾角触发（迟滞），停自转+航向对齐+纯追踪恒速直穿；角/线速度限速 + 最小转弯半径；坡上禁用脊线纠偏；爬行兜底 |
+| debug 参数热重载 | ✅ | `debug_mode:=true` 时 `ros2 param set` 即时生效（controller/mpc/safety/replan/stuck 前缀），比赛/真车锁死 |
 | 世界系指令 + 底盘 yaw 下沉 | ✅ | `/cmd_vel_world` → chassis_cmd_node 高频陀螺积分 yaw 旋转（真车由电控 MCU 替代同一逻辑）|
 | RMUC 仿真 | ✅ | submodule 提供 |
 | 真车适配 | 🟡 | 需替换 LIO 输入话题 + map→odom 全局定位 |
@@ -428,6 +438,8 @@ ros2 launch sentry_bringup bringup.launch.py \
 - 端到端验证在线建图模式（`OnlineMapProxy` 已接入 JPS，待跑通 + 调参）
 - ~~局部规划器 trajectory swap 原子化（修 race）~~ ✅ 已完成（`TrajSnapshot` 只读快照交换）
 - ~~点云分支补 raycast clearing~~ ✅ 已完成（法向量分类 + raycast + 占据超时）
+- ~~单线程 executor 阻塞 50Hz 控制回路~~ ✅ 已完成（MultiThreadedExecutor + 重规划独立回调组）
+- ~~debug 模式参数热重载~~ ✅ 已完成（`debug_mode:=true` 时 `ros2 param set` 即时生效）
 - 标注图补高地南沿缺口（x 6.5~12.4 段，真值有 0.2m 台阶，JPS 可能直穿）
 - 幽灵格注入恢复时限、0.70m 东坡道通行的整机回归测试
 
@@ -456,6 +468,9 @@ ros2 launch sentry_bringup bringup.launch.py \
 - 真车上线前：删除 `sim_test.launch.py` 里的静态 `map→odom` TF（bringup 经 sim_test 引入），接入 AMCL 或视觉定位；`chassis_cmd_node` 由电控 MCU 固件替代
 - 若局部规划器 NaN 崩溃：通常是 `solveQuintic` 输入 waypoints 过于贴近，检查 A* 输出去重
 - 机器人趴窝先 grep 阶段归因日志：规划失败必有 `Plan stage A*/sampling/MINCO` 与 A* 失败原因（budget/open-empty/allocate）输出，静默无日志本身就是 bug
+- 调参不用重启：`debug_mode: true` 后 `ros2 param set /sentry_local_planner controller.min_turn_radius 0.8` 即时生效（注意该 ROS2 版本 `--params-file` 优先级高于命令行 `-p`，debug_mode 请改 yaml）
+- 反复刷 `Far goal ... without global path` 但全局路径已收到：目标回调与全局路径的握手竞态（已修），若仍出现先确认 JPS 确实出路径（`Global JPS: no path found`）
+- 坡脚/台阶沿卡死先分层面：恒定 `/cmd_vel` 直行能走通 → 闭环行为问题；走不通 → 物理/地形（轮径 7.6cm 爬不了 ~20cm 台阶沿，属地图标注/路线问题，非算法问题）
 - 性能异常（规划超预算）先确认 build type：`grep -- -O build/<pkg>/CMakeFiles/*/flags.make`，colcon 默认无优化标志
 
 ---
